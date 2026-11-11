@@ -24,5 +24,4 @@ dist-ssr
 *.sw?
 
 # Generated from tracks.json by scripts/build-tracks.ts
-.cache
 public/tracks.geojson

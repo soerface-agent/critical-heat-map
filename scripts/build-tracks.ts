@@ -1,5 +1,5 @@
 // Downloads the GPX traces listed in tracks.json from openstreetmap.org, simplifies them and
-// writes them as one GeoJSON file for the map. Downloads are cached in .cache/gpx.
+// writes them as one GeoJSON file for the map. Downloads are stored in data/gpx (committed, so openstreetmap.org is only hit for new tracks).
 
 import { mkdir, readFile, writeFile, access } from 'node:fs/promises'
 import { gpx } from '@tmcw/togeojson'
@@ -11,7 +11,7 @@ import type { TrackProperties } from '../src/lib/track-types.ts'
 /** An entry of tracks.json */
 type TrackEntry = Pick<TrackProperties, 'osm' | 'user' | 'title' | 'type'>
 
-const CACHE_DIR = '.cache/gpx'
+const CACHE_DIR = 'data/gpx'
 const OUTPUT = 'public/tracks.geojson'
 // Douglas-Peucker tolerance in degrees, roughly 2 m
 const TOLERANCE = 0.00002
