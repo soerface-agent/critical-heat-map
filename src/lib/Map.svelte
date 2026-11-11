@@ -2,29 +2,75 @@
   import * as maplibregl from 'maplibre-gl'
   import 'maplibre-gl/dist/maplibre-gl.css'
   import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url'
-  import { addTracks } from './tracks'
+  import { app } from './state.svelte'
+  import { addTracks, drawPlayback, highlightTrack, showTracks } from './tracks'
+  import type { BBox } from './track-types'
 
   // MapLibre looks for its worker next to its own module, which Vite's dependency
   // pre-bundling moves, so point it at the worker file explicitly
   maplibregl.setWorkerUrl(workerUrl)
 
-  // Kassel, where most of the Critical Mass tracks are
-  const KASSEL: [number, number] = [9.4985241, 51.3156676]
-
   let container: HTMLDivElement
+  let map = $state.raw<maplibregl.Map | null>(null)
+  let ready = $state(false)
+
+  // MapLibre keeps the position in the hash; without one, start at the city with the most tracks
+  let positioned = /^#[\d.]+\/[-\d.]+\/[-\d.]+/.test(location.hash)
 
   $effect(() => {
-    const map = new maplibregl.Map({
+    const instance = new maplibregl.Map({
       container,
       style: 'https://tiles.openfreemap.org/styles/positron',
-      center: KASSEL,
-      zoom: 13,
+      center: [9.4985241, 51.3156676],
+      zoom: 12,
+      hash: true,
     })
-    map.addControl(new maplibregl.NavigationControl(), 'top-right')
-    map.addControl(new maplibregl.ScaleControl(), 'bottom-left')
-    map.on('load', () => addTracks(map))
+    instance.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right')
+    instance.addControl(new maplibregl.ScaleControl(), 'bottom-right')
 
-    return () => map.remove()
+    const updateBounds = () => (app.bounds = instance.getBounds().toArray().flat() as BBox)
+    instance.on('moveend', updateBounds)
+    instance.on('load', () => {
+      updateBounds()
+      ready = true
+    })
+    map = instance
+    app.map = instance
+    return () => {
+      app.map = null
+      instance.remove()
+    }
+  })
+
+  $effect(() => {
+    const city = app.cities[0]
+    if (map && city && !positioned) {
+      map.fitBounds(city.bbox, { padding: 40, animate: false })
+      positioned = true
+    }
+  })
+
+  // Add the tracks once both the map style and the data are loaded
+  let added = $state(false)
+  $effect(() => {
+    if (map && ready && app.collection && !added) {
+      addTracks(map, app.collection)
+      added = true
+    }
+  })
+
+  $effect(() => {
+    if (!map || !added) return
+    const shown = app.current ? app.queue.slice(0, app.index) : app.drawn
+    showTracks(map, shown.map((track) => track.osm))
+  })
+
+  $effect(() => {
+    if (map && added) highlightTrack(map, app.hovered)
+  })
+
+  $effect(() => {
+    if (map && added) drawPlayback(map, app.current, app.progress)
   })
 </script>
 

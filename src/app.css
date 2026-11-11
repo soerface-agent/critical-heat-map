@@ -1,3 +1,15 @@
+:root {
+  --background: #f6f5f2;
+  --surface: #ffffff;
+  --text: #1c1b19;
+  --text-2: #4a4843;
+  --muted: #6b6862;
+  --border: #e3e1dc;
+  --border-strong: #d5d2cb;
+  --hover: #f1efea;
+  --display: 'Space Grotesk', Inter, system-ui, sans-serif;
+}
+
 html,
 body,
 #app {
@@ -6,7 +18,35 @@ body,
 }
 
 body {
-  font-family: system-ui, sans-serif;
+  font-family: Inter, system-ui, sans-serif;
+  color: var(--text);
+  background: var(--background);
+}
+
+button,
+select {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+:focus-visible {
+  outline: 2px solid #1f4fbf;
+  outline-offset: 2px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
 }
 
 .track-list {
@@ -21,7 +61,14 @@ body {
   margin-top: 4px;
 }
 
-.track-list time {
+.track-list .dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+}
+
+.track-list small {
   color: #666;
-  font-size: 0.85em;
 }
