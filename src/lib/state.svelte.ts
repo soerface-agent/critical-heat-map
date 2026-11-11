@@ -20,6 +20,15 @@ export interface MonthRange {
 const DRAW_SECONDS = 1.2
 const HOLD = 0.25
 const MONTH = /^\d{4}-\d{2}$/
+const SIDEBAR_KEY = 'sidebar'
+
+function storedSidebar(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_KEY) !== 'closed'
+  } catch {
+    return true
+  }
+}
 
 export function trackMonth(track: Track): string {
   return (track.start ?? '').slice(0, 7)
@@ -42,6 +51,7 @@ class AppState {
   /** The visible part of the map */
   bounds = $state.raw<BBox | null>(null)
   hovered = $state<number | null>(null)
+  sidebarOpen = $state(storedSidebar())
   map: Map | null = null
 
   /** Tracks in the map view and the time range: the ones the sidebar lists */
@@ -66,6 +76,24 @@ class AppState {
   playing = $state(false)
   speed = $state(1)
   current = $derived(this.index >= 0 ? (this.queue[this.index] ?? null) : null)
+
+  /** Totals of the selected rides, or while playing, of the part drawn so far */
+  totals = $derived.by(() => {
+    if (!this.current) {
+      return {
+        rides: this.selected.length,
+        km: this.selected.reduce((sum, track) => sum + track.km, 0),
+        minutes: this.selected.reduce((sum, track) => sum + track.minutes, 0),
+      }
+    }
+    const done = this.queue.slice(0, this.index)
+    const drawn = Math.min(1, this.progress)
+    return {
+      rides: this.index + 1,
+      km: done.reduce((sum, track) => sum + track.km, 0) + this.current.km * drawn,
+      minutes: done.reduce((sum, track) => sum + track.minutes, 0) + this.current.minutes * drawn,
+    }
+  })
   #generation = 0
 
   inView(track: Track): boolean {
@@ -87,6 +115,15 @@ class AppState {
     for (const track of tracks) {
       if (hidden) this.hidden.add(track.osm)
       else this.hidden.delete(track.osm)
+    }
+  }
+
+  toggleSidebar() {
+    this.sidebarOpen = !this.sidebarOpen
+    try {
+      localStorage.setItem(SIDEBAR_KEY, this.sidebarOpen ? 'open' : 'closed')
+    } catch {
+      // Without storage the choice only lasts for this page view
     }
   }
 

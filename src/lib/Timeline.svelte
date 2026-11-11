@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { eventType } from './event-types'
+  import { eventColor } from './event-types'
   import { fullDate, km, monthLabel, shortTitle } from './format'
   import { app, type Track } from './state.svelte'
 
@@ -98,25 +98,31 @@
   <div class="axis">
     <div class="status">
       {#if app.current}
-        <span class="dot" style:background={eventType(app.current.type).color}></span>
+        <span class="dot" style:background={eventColor(app.current.type)}></span>
         <strong>{shortTitle(app.current.title)}</strong>
         <span>
           {app.current.start ? fullDate(app.current.start) : ''} · {km(app.current.km)} km · ride {app.index + 1} of {app.queue.length},
-          {km(
-            app.queue.slice(0, app.index + 1).reduce((sum, track) => sum + track.km, 0),
-            0,
-          )} km so far
+{km(app.totals.km, 0)} km so far
         </span>
       {:else if app.range}
         <strong>{monthLabel(app.range.from)} – {monthLabel(app.range.to)}</strong>
         <button type="button" onclick={() => (app.range = null)}>Clear range</button>
       {:else}
-        <span>Drag across the timeline to pick a time range, or click a year.</span>
+        <span>Drag across the timeline to pick a time range, or click a year. Double-click to clear.</span>
       {/if}
     </div>
 
-    <!-- Pointer-only brush; the year buttons below select ranges by keyboard -->
-    <div class="bars" role="presentation" onpointerdown={brushStart} onpointermove={brushMove} onpointerup={brushEnd} onpointercancel={brushEnd}>
+    <!-- Pointer-only brush, cleared by double click; the year buttons and "Clear range" work by keyboard -->
+    <div
+      class="bars"
+      role="presentation"
+      title="Drag to pick a time range, double-click to clear it"
+      onpointerdown={brushStart}
+      onpointermove={brushMove}
+      onpointerup={brushEnd}
+      onpointercancel={brushEnd}
+      ondblclick={() => (app.range = null)}
+    >
       {#if app.range}
         <div
           class="range"
@@ -139,7 +145,7 @@
           class:faded={!app.inRange(track) || (pending && visible && shown)}
           class:hot={app.hovered === track.osm || app.current?.osm === track.osm}
           style:left="{trackPosition(track)}%"
-          style:--color={eventType(track.type).color}
+          style:--color={eventColor(track.type)}
           aria-label="{track.title}, {km(track.km)} km{visible ? '' : ', outside the map view'}"
           aria-pressed={shown}
           onclick={() => app.setHidden([track], shown)}
@@ -170,12 +176,6 @@
     </div>
   </div>
 
-  <ul class="legend">
-    <li>Tall bar: in map view</li>
-    <li>Short grey: elsewhere</li>
-    <li>Hollow: unchecked</li>
-    <li>Click a bar to toggle</li>
-  </ul>
 </section>
 
 <style>
@@ -206,7 +206,7 @@
     border: none;
     border-radius: 50%;
     background: var(--text);
-    color: #fff;
+    color: var(--surface);
   }
 
   .small-controls {
@@ -263,7 +263,7 @@
   .bars {
     position: relative;
     flex: 1;
-    border-bottom: 1px solid #bdb9b0;
+    border-bottom: 1px solid var(--axis);
     cursor: crosshair;
     touch-action: none;
     user-select: none;
@@ -274,8 +274,8 @@
     top: 0;
     bottom: 0;
     box-sizing: border-box;
-    background: rgb(31 79 191 / 0.1);
-    border-inline: 2px solid #1f4fbf;
+    background: var(--accent-soft);
+    border-inline: 2px solid var(--accent);
   }
 
   .year-line {
@@ -293,8 +293,8 @@
     margin-left: -4px;
     padding: 0;
     box-sizing: border-box;
-    background: #d9d6cf;
-    border: 1.5px solid #d9d6cf;
+    background: var(--bar-muted);
+    border: 1.5px solid var(--bar-muted);
     border-bottom: none;
     border-radius: 3px 3px 0 0;
   }
@@ -333,7 +333,7 @@
     padding: 4px 8px;
     border-radius: 4px;
     background: var(--text);
-    color: #fff;
+    color: var(--surface);
     font-size: 12px;
     white-space: nowrap;
     transform: translateX(-50%);
@@ -359,21 +359,7 @@
   }
 
   .years button[aria-pressed='true'] {
-    background: #dfe7f8;
-  }
-
-  .legend {
-    display: flex;
-    flex: none;
-    flex-direction: column;
-    justify-content: center;
-    gap: 4px;
-    width: 150px;
-    margin: 0;
-    padding: 0;
-    font-size: 12px;
-    color: var(--text-2);
-    list-style: none;
+    background: var(--accent-soft);
   }
 
   @media (max-width: 720px) {
@@ -407,10 +393,6 @@
       white-space: normal;
       height: auto;
       min-height: 28px;
-    }
-
-    .legend {
-      display: none;
     }
   }
 </style>

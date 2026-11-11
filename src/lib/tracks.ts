@@ -1,7 +1,7 @@
 import * as maplibregl from 'maplibre-gl'
 import type { ExpressionSpecification } from 'maplibre-gl'
 import type { Feature, MultiLineString } from 'geojson'
-import { EVENT_TYPES, eventType } from './event-types'
+import { EVENT_TYPES, eventColor } from './event-types'
 import { fullDate, km } from './format'
 import { partialLines } from './geometry'
 import { app, type Track } from './state.svelte'
@@ -13,15 +13,24 @@ const PLAYBACK = 'playback'
 // Pixels around the cursor in which a track counts as hovered, since the lines are thin
 const HIT_RADIUS = 4
 
-const COLOR: ExpressionSpecification = [
-  'match',
-  ['get', 'type'],
-  ...Object.entries(EVENT_TYPES).flatMap(([type, { color }]) => [type, color]),
-  EVENT_TYPES.other.color,
-] as unknown as ExpressionSpecification
+// The track whose hover feature-state is set
+let hovered: number | null = null
 
-/** Adds the tracks as lines colored by event type, with hover highlighting and a popup on click. */
-export function addTracks(map: maplibregl.Map, collection: TrackCollection) {
+function color(dark: boolean): ExpressionSpecification {
+  const pick = ({ color, dark: darkColor }: { color: string; dark: string }) => (dark ? darkColor : color)
+  return [
+    'match',
+    ['get', 'type'],
+    ...Object.entries(EVENT_TYPES).flatMap(([type, eventType]) => [type, pick(eventType)]),
+    pick(EVENT_TYPES.other),
+  ] as unknown as ExpressionSpecification
+}
+
+/**
+ * Adds the tracks as lines colored by event type, initially all hidden. Needs to be called again
+ * after the map style changes, since that removes all sources and layers.
+ */
+export function addTrackLayers(map: maplibregl.Map, collection: TrackCollection, dark: boolean) {
   map.addSource(SOURCE, { type: 'geojson', data: collection, promoteId: 'osm' })
   map.addSource(PLAYBACK, { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
 
@@ -36,8 +45,9 @@ export function addTracks(map: maplibregl.Map, collection: TrackCollection) {
       filter: ['in', ['get', 'osm'], ['literal', []]],
       layout: { 'line-join': 'round', 'line-cap': 'round' },
       paint: {
-        'line-color': COLOR,
-        'line-opacity': ['case', hover, 0.95, 0.35],
+        'line-color': color(dark),
+        // Lines on the dark map need more opacity to stand out as much
+        'line-opacity': ['case', hover, 0.95, dark ? 0.45 : 0.35],
         'line-width': ['interpolate', ['linear'], ['zoom'], 10, ['case', hover, 3, 1.5], 16, ['case', hover, 7, 4]],
       },
     },
@@ -50,15 +60,21 @@ export function addTracks(map: maplibregl.Map, collection: TrackCollection) {
       source: PLAYBACK,
       layout: { 'line-join': 'round', 'line-cap': 'round' },
       paint: {
-        'line-color': COLOR,
+        'line-color': color(dark),
         'line-opacity': 0.95,
         'line-width': ['interpolate', ['linear'], ['zoom'], 10, 3, 16, 7],
       },
     },
     firstSymbol,
   )
+  hovered = null
+}
 
+/** Hover highlighting and a popup on click; call once per map */
+export function bindTrackEvents(map: maplibregl.Map) {
   function tracksAt(point: maplibregl.Point): Track[] {
+    // The layer is missing while a new map style loads
+    if (!map.getLayer(LAYER)) return []
     const features = map.queryRenderedFeatures(
       [
         [point.x - HIT_RADIUS, point.y - HIT_RADIUS],
@@ -93,8 +109,6 @@ export function showTracks(map: maplibregl.Map, ids: number[]) {
   map.setFilter(LAYER, ['in', ['get', 'osm'], ['literal', ids]])
 }
 
-let hovered: number | null = null
-
 export function highlightTrack(map: maplibregl.Map, id: number | null) {
   if (hovered !== null) map.setFeatureState({ source: SOURCE, id: hovered }, { hover: false })
   if (id !== null) map.setFeatureState({ source: SOURCE, id }, { hover: true })
@@ -122,7 +136,7 @@ function popupContent(tracks: Track[]): HTMLElement {
     const item = document.createElement('li')
     const dot = document.createElement('span')
     dot.className = 'dot'
-    dot.style.background = eventType(track.type).color
+    dot.style.background = eventColor(track.type)
     const link = document.createElement('a')
     link.href = track.url
     link.target = '_blank'

@@ -1,14 +1,14 @@
 <script lang="ts">
-  import { EVENT_TYPES, eventType } from './event-types'
+  import { EVENT_TYPES, eventColor } from './event-types'
   import { dayMonth, duration, km, monthLabel, shortTitle } from './format'
   import { app, type Track } from './state.svelte'
 
   const total = (tracks: Track[]) => tracks.reduce((sum, track) => sum + track.km, 0)
 
   let chips = $derived(
-    Object.entries(EVENT_TYPES).map(([type, { label, color }]) => {
+    Object.entries(EVENT_TYPES).map(([type, { label }]) => {
       const tracks = app.listed.filter((track) => track.type === type)
-      return { label, color, tracks, on: tracks.length > 0 && tracks.every((track) => !app.hidden.has(track.osm)) }
+      return { label, color: eventColor(type), tracks, on: tracks.length > 0 && tracks.every((track) => !app.hidden.has(track.osm)) }
     }),
   )
 
@@ -25,16 +25,19 @@
       on: tracks.every((track) => !app.hidden.has(track.osm)),
     }))
   })
-
-  let minutes = $derived(app.selected.reduce((sum, track) => sum + track.minutes, 0))
 </script>
 
-<aside aria-label="Rides in this map view">
+<aside id="sidebar" aria-label="Rides in this map view">
   <header>
     <div class="label">In this map view</div>
-    <div class="total">{km(total(app.selected), 0)} km</div>
+    <div class="total">{km(app.totals.km, 0)} km</div>
     <div class="meta">
-      {app.selected.length} of {app.listed.length} rides · {Math.round(minutes / 60)} h riding
+      {#if app.current}
+        {app.totals.rides} of {app.queue.length} rides drawn
+      {:else}
+        {app.totals.rides} of {app.listed.length} rides
+      {/if}
+      · {Math.round(app.totals.minutes / 60)} h riding
     </div>
     {#if app.range}
       <div class="meta">{monthLabel(app.range.from)} – {monthLabel(app.range.to)}</div>
@@ -86,7 +89,7 @@
           <input
             type="checkbox"
             checked={!hidden}
-            style:accent-color={eventType(track.type).color}
+            style:accent-color={eventColor(track.type)}
             onchange={() => app.setHidden([track], !hidden)}
           />
           <span class="date">{track.start ? dayMonth(track.start) : ''}</span>
@@ -159,7 +162,7 @@
   .chip.on {
     border-color: var(--color);
     background: var(--color);
-    color: #fff;
+    color: var(--on-color);
   }
 
   .chip .dot {
@@ -171,7 +174,7 @@
   }
 
   .chip.on .dot {
-    background: #fff;
+    background: var(--on-color);
   }
 
   .count {
