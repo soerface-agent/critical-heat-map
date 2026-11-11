@@ -95,10 +95,11 @@
 
   const ridden = (track: Track) => Math.min(1, ((app.time ?? track.to) - track.from) / (track.to - track.from))
 
-  // While playing, keep the playhead in view by turning the page when it leaves the zoomed-in part
+  // Keep the playhead in view while playing or skipping, by turning the page when it leaves the
+  // zoomed-in part
   $effect(() => {
     const time = app.time
-    if (!app.playing || time === null) return
+    if (time === null) return
     const { from, to } = untrack(() => app.domain)
     if (time < from || time > to) app.zoomTo({ from: time - (to - from) * 0.05, to: time + (to - from) * 0.95 })
   })
@@ -192,6 +193,19 @@
   <div class="controls">
     <button
       type="button"
+      class="skip"
+      aria-label="Previous ride"
+      title="Previous ride"
+      disabled={app.sessions.length === 0}
+      onclick={() => app.skipBack()}
+    >
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+        <rect x="2" y="3" width="2" height="10" rx="0.5" fill="currentColor" />
+        <path d="M14 3.5v9L5.5 8z" fill="currentColor" />
+      </svg>
+    </button>
+    <button
+      type="button"
       class="play"
       aria-label={app.playing ? 'Pause' : 'Play selected rides'}
       onclick={() => (app.playing ? app.pause() : app.play())}
@@ -203,6 +217,19 @@
         {:else}
           <path d="M6 3.5v13l11-6.5z" fill="currentColor" />
         {/if}
+      </svg>
+    </button>
+    <button
+      type="button"
+      class="skip"
+      aria-label="Next ride"
+      title="Next ride"
+      disabled={app.time === null || !app.sessions.some((session) => session.from > app.time!)}
+      onclick={() => app.skipForward()}
+    >
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M2 3.5v9L10.5 8z" fill="currentColor" />
+        <rect x="12" y="3" width="2" height="10" rx="0.5" fill="currentColor" />
       </svg>
     </button>
     <div class="small-controls">
@@ -345,6 +372,19 @@
     border-radius: 50%;
     background: var(--text);
     color: var(--surface);
+  }
+
+  .skip {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: 1px solid var(--border-strong);
+    border-radius: 50%;
+    background: var(--surface);
+    color: var(--text);
   }
 
   .small-controls {

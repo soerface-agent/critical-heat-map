@@ -111,7 +111,7 @@
   // As a string, so the filter is only set again when the finished tracks change, not on every frame
   let finished = $derived(app.finished.map((track) => track.osm).join(','))
   $effect(() => {
-    if (map && layers) showTracks(map, finished ? finished.split(',').map(Number) : [])
+    if (map && layers) showTracks(map, finished ? finished.split(',').map(Number) : [], app.heat)
   })
 
   $effect(() => {
@@ -127,7 +127,7 @@
   })
 
   $effect(() => {
-    if (map && layers) drawPlayback(map, app.riding, app.time, style)
+    if (map && layers) drawPlayback(map, app.riding, app.afterglow, app.time, style)
   })
 </script>
 

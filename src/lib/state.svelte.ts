@@ -25,6 +25,8 @@ export const SPEEDS = [1, 10, 60, 300, 1200, 3600]
 export const MAX_SPEED = 86_400
 // Pause in milliseconds after the rides of one evening, before playback skips to the next ones
 const HOLD = 1000
+// Seconds of playback a finished ride keeps glowing while the next ones are played
+const AFTERGLOW = 3
 // Smallest time span the timeline zooms in to
 const MIN_SPAN = 10 * 60_000
 const SIDEBAR_KEY = 'sidebar'
@@ -107,6 +109,24 @@ class AppState {
   riding = $derived(this.time === null ? [] : this.drawn.filter((track) => track.from <= this.time! && this.time! < track.to))
   /** Tracks drawn in full: all of them, or while playing back, the ones finished */
   finished = $derived(this.time === null ? this.drawn : this.drawn.filter((track) => track.to <= this.time!))
+
+  /**
+   * Rides that finished a moment ago, with how far their glow faded (0–1). It fades while the next
+   * rides are played, so it lasts through the pause before them and the jump to them
+   */
+  afterglow = $derived.by(() => {
+    const time = this.time
+    if (time === null) return []
+    const length = AFTERGLOW * 1000 * this.speed
+    return this.drawn.flatMap((track) => {
+      if (track.to > time) return []
+      const played = this.sessions.reduce(
+        (sum, session) => sum + Math.max(0, Math.min(session.to, time) - Math.max(session.from, track.to)),
+        0,
+      )
+      return played < length ? [{ track, fade: played / length }] : []
+    })
+  })
 
   /** Spans of time in which at least one selected ride is underway, in order */
   sessions = $derived.by(() => {
@@ -221,6 +241,20 @@ class AppState {
       requestAnimationFrame(frame)
     }
     requestAnimationFrame(frame)
+  }
+
+  /** Jumps to the start of the ride underway, or once there, to the previous one */
+  skipBack() {
+    // Within the first second of playback a ride counts as just started
+    const time = (this.time ?? Infinity) - 1000 * this.speed
+    const target = this.sessions.findLast((session) => session.from < time) ?? this.sessions[0]
+    if (target) this.seek(target.from)
+  }
+
+  /** Jumps to the start of the next ride */
+  skipForward() {
+    const next = this.time === null ? undefined : this.sessions.find((session) => session.from > this.time!)
+    if (next) this.seek(next.from)
   }
 
   pause() {

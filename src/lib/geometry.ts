@@ -22,22 +22,22 @@ export function linesBetween(lines: Position[][], from: number, to: number): Pos
   return result
 }
 
-/** Points along lines of [lon, lat] about every `step` km, for a heat map that weighs a track by its length */
-export function pointsAlong(lines: Position[][], step: number): Position[] {
+/** Points along a line of [lon, lat] about every `step` km, including its first point */
+export function pointsAlong(line: Position[], step: number): Position[] {
   const points: Position[] = []
-  for (const line of lines) {
-    // Kilometers per degree; the latitude hardly changes within a city
-    const ky = 111.32
-    const kx = ky * Math.cos((line[0][1] * Math.PI) / 180)
-    let carry = 0
-    for (let i = 1; i < line.length; i++) {
-      const [x1, y1] = line[i - 1]
-      const [x2, y2] = line[i]
-      const length = Math.hypot((x2 - x1) * kx, (y2 - y1) * ky)
-      for (let d = carry; d < length; d += step) points.push([x1 + ((x2 - x1) * d) / length, y1 + ((y2 - y1) * d) / length])
-      carry = (carry - length) % step
-      if (carry < 0) carry += step
-    }
+  // Kilometers per degree; the latitude hardly changes within a city
+  const ky = 111.32
+  const kx = ky * Math.cos((line[0][1] * Math.PI) / 180)
+  let carry = 0
+  for (let i = 1; i < line.length; i++) {
+    const [x1, y1] = line[i - 1]
+    const [x2, y2] = line[i]
+    const length = Math.hypot((x2 - x1) * kx, (y2 - y1) * ky)
+    for (let d = carry; d < length; d += step) points.push([x1 + ((x2 - x1) * d) / length, y1 + ((y2 - y1) * d) / length])
+    carry = (carry - length) % step
+    if (carry < 0) carry += step
   }
+  const [x, y] = line.at(-1)!
+  points.push([x, y])
   return points
 }
