@@ -4,15 +4,22 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "tracks": "node scripts/build-tracks.ts",
+    "predev": "npm run tracks",
     "dev": "vite",
+    "prebuild": "npm run tracks",
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.1",
+    "@tmcw/togeojson": "^7.1.3",
     "@tsconfig/svelte": "^5.0.8",
+    "@types/geojson": "^7946.0.16",
     "@types/node": "^24.19.2",
+    "@xmldom/xmldom": "^0.9.12",
+    "simplify-js": "^1.2.4",
     "svelte": "^5.57.3",
     "svelte-check": "^4.7.7",
     "typescript": "~6.0.3",

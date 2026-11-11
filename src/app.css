@@ -8,3 +8,20 @@ body,
 body {
   font-family: system-ui, sans-serif;
 }
+
+.track-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.track-list li + li {
+  margin-top: 4px;
+}
+
+.track-list time {
+  color: #666;
+  font-size: 0.85em;
+}

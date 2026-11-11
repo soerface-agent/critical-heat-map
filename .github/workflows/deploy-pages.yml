@@ -29,6 +29,12 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # GPX downloads from openstreetmap.org, so only new tracks are fetched
+      - uses: actions/cache@v4
+        with:
+          path: .cache/gpx
+          key: gpx-${{ hashFiles('tracks.json') }}
+          restore-keys: gpx-
       - run: npm run build -- --base=/${{ github.event.repository.name }}/
       - uses: actions/upload-pages-artifact@v3
         with:

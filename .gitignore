@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Generated from tracks.json by scripts/build-tracks.ts
+.cache
+public/tracks.geojson
