@@ -34,8 +34,11 @@ export function addTrackLayers(map: maplibregl.Map, collection: TrackCollection,
   map.addSource(SOURCE, { type: 'geojson', data: collection, promoteId: 'osm' })
   map.addSource(PLAYBACK, { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
 
-  // Draw the tracks below the first label layer, so street names stay readable
-  const firstSymbol = map.getStyle().layers.find((layer) => layer.type === 'symbol')?.id
+  // Draw the tracks above all streets but below the labels that follow them, so street names stay
+  // readable. Not simply below the first label layer: the dark style has one before the streets
+  const layers = map.getStyle().layers
+  const lastNonSymbol = layers.findLastIndex((layer) => layer.type !== 'symbol')
+  const firstSymbol = layers[lastNonSymbol + 1]?.id
   const hover: ExpressionSpecification = ['boolean', ['feature-state', 'hover'], false]
   map.addLayer(
     {
