@@ -1,12 +1,11 @@
 // Downloads the GPX traces listed in tracks.json from openstreetmap.org, simplifies them and
-// writes them as one GeoJSON file for the map. Downloads are stored in data/gpx (committed, so openstreetmap.org is only hit for new tracks).
+// writes them as one GeoJSON file for the map, with the time of every point for playback. Downloads are stored in data/gpx (committed, so openstreetmap.org is only hit for new tracks).
 // Tracks close to each other are grouped into cities, named by reverse geocoding with Nominatim
 // (cached in data/places.json, committed as well).
 
 import { mkdir, readFile, writeFile, access } from 'node:fs/promises'
 import { gpx } from '@tmcw/togeojson'
 import { DOMParser } from '@xmldom/xmldom'
-import simplify from 'simplify-js'
 import type { Feature, MultiLineString, Position } from 'geojson'
 import type { BBox, City, TrackCollection, TrackProperties } from '../src/lib/track-types.ts'
 
@@ -17,8 +16,10 @@ const CACHE_DIR = 'data/gpx'
 const PLACES = 'data/places.json'
 const USER_AGENT = 'critical-heat-map (https://code.flipdot.org/soerface/critical-heat-map)'
 const OUTPUT = 'public/tracks.geojson'
-// Douglas-Peucker tolerance in degrees, roughly 2 m
+// Douglas-Peucker tolerance in degrees for the shape of a track, roughly 2 m
 const TOLERANCE = 0.00002
+// Tolerance for where the rider is at a given time during playback, roughly 15 m
+const TIME_TOLERANCE = 0.00015
 // Coordinates are rounded to this many decimals, roughly 0.1 m
 const PRECISION = 6
 // Points closer than this to the last counted one are GPS jitter, e.g. while standing at a red light
@@ -87,51 +88,83 @@ function bboxOf(points: Position[]): BBox {
   return [Math.min(...lons), Math.min(...lats), Math.max(...lons), Math.max(...lats)]
 }
 
+/**
+ * Douglas-Peucker on [lon, lat, seconds] positions. Besides the shape, it keeps the timing: a point
+ * also stays if it is far from where the rider would be at its time when moving evenly between the
+ * kept points (the synchronized Euclidean distance), so stops at red lights survive.
+ */
 function simplifyLine(line: Position[]): Position[] {
-  const points = line.map(([x, y]) => ({ x, y }))
+  const keep = new Uint8Array(line.length)
+  keep[0] = keep[line.length - 1] = 1
+  const stack = [[0, line.length - 1]]
+  while (stack.length > 0) {
+    const [first, last] = stack.pop()!
+    const [x1, y1, t1] = line[first]
+    const [x2, y2, t2] = line[last]
+    const length = Math.hypot(x2 - x1, y2 - y1)
+    let max = 1
+    let index = -1
+    for (let i = first + 1; i < last; i++) {
+      const [x, y, t] = line[i]
+      const shape = length > 0 ? Math.abs((x2 - x1) * (y1 - y) - (x1 - x) * (y2 - y1)) / length : Math.hypot(x - x1, y - y1)
+      const f = t2 > t1 ? (t - t1) / (t2 - t1) : 0
+      const timing = Math.hypot(x - (x1 + (x2 - x1) * f), y - (y1 + (y2 - y1) * f))
+      const error = Math.max(shape / TOLERANCE, timing / TIME_TOLERANCE)
+      if (error > max) {
+        max = error
+        index = i
+      }
+    }
+    if (index < 0) continue
+    keep[index] = 1
+    stack.push([first, index], [index, last])
+  }
   const factor = 10 ** PRECISION
-  return simplify(points, TOLERANCE, true).map(({ x, y }) => [
-    Math.round(x * factor) / factor,
-    Math.round(y * factor) / factor,
-  ])
+  return line.filter((_, i) => keep[i]).map(([x, y, t]) => [Math.round(x * factor) / factor, Math.round(y * factor) / factor, t])
 }
 
 async function buildTrack(entry: TrackEntry): Promise<Feature<MultiLineString, TrackProperties>> {
   const doc = new DOMParser().parseFromString(await loadGpx(entry.osm), 'text/xml')
+  // Positions with the time they were recorded at, in milliseconds
   const lines: Position[][] = []
-  let start: string | null = null
-  let end: string | null = null
 
   for (const feature of gpx(doc as unknown as Parameters<typeof gpx>[0]).features) {
     const geometry = feature.geometry
-    if (!geometry) continue
-    if (geometry.type === 'LineString') lines.push(geometry.coordinates)
-    else if (geometry.type === 'MultiLineString') lines.push(...geometry.coordinates)
-    else continue
-
     const times = feature.properties?.coordinateProperties?.times
-    const flat: unknown[] = (times ?? []).flat()
-    const first = flat[0]
-    const last = flat.at(-1)
-    if (!start && typeof first === 'string') start = first
-    if (typeof last === 'string') end = last
-  }
-  if (lines.length === 0) throw new Error(`trace ${entry.osm} contains no track`)
+    let parts: { coordinates: Position[]; times: unknown[] }[]
+    if (geometry?.type === 'LineString') parts = [{ coordinates: geometry.coordinates, times: times ?? [] }]
+    else if (geometry?.type === 'MultiLineString') {
+      parts = geometry.coordinates.map((coordinates, i) => ({ coordinates, times: times?.[i] ?? [] }))
+    } else continue
 
-  const minutes = start && end ? Math.round((Date.parse(end) - Date.parse(start)) / 60000) : 0
+    for (const part of parts) {
+      // Points without a time can't be played back
+      const line = part.coordinates.flatMap(([lon, lat], i) => {
+        const time = part.times[i]
+        return typeof time === 'string' ? [[lon, lat, Date.parse(time)]] : []
+      })
+      if (line.length >= 2) lines.push(line)
+    }
+  }
+  if (lines.length === 0) throw new Error(`trace ${entry.osm} contains no track with timestamps`)
+
+  const start = Math.min(...lines.map((line) => line[0][2]))
+  const end = Math.max(...lines.map((line) => line.at(-1)![2]))
+  const relative = lines.map((line) => line.map(([lon, lat, time]) => [lon, lat, Math.round((time - start) / 1000)]))
   const round = (value: number) => Math.round(value * 10 ** PRECISION) / 10 ** PRECISION
   return {
     type: 'Feature',
     geometry: {
       type: 'MultiLineString',
-      coordinates: lines.map(simplifyLine).filter((line) => line.length >= 2),
+      coordinates: relative.map(simplifyLine),
     },
     properties: {
       ...entry,
       url: `https://www.openstreetmap.org/user/${encodeURIComponent(entry.user)}/traces/${entry.osm}`,
-      start,
+      start: new Date(start).toISOString(),
+      end: new Date(end).toISOString(),
       km: Math.round(lines.reduce((sum, line) => sum + lineKm(line), 0) * 10) / 10,
-      minutes,
+      minutes: Math.round((end - start) / 60000),
       bbox: bboxOf(lines.flat()).map(round) as BBox,
       // Filled in by assignCities
       city: '',
@@ -209,7 +242,7 @@ for (const entry of entries) {
 }
 
 // Sorted by date, which the timeline and playback rely on
-features.sort((a, b) => (a.properties.start ?? '').localeCompare(b.properties.start ?? ''))
+features.sort((a, b) => a.properties.start.localeCompare(b.properties.start))
 const cities = await assignCities(features)
 
 const collection: TrackCollection = { type: 'FeatureCollection', cities, features }

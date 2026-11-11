@@ -1,22 +1,41 @@
 import * as maplibregl from 'maplibre-gl'
 import type { ExpressionSpecification } from 'maplibre-gl'
-import type { Feature, MultiLineString } from 'geojson'
-import { EVENT_TYPES, eventColor } from './event-types'
+import type { Feature, FeatureCollection, Point, Position } from 'geojson'
+import { EVENT_TYPES, eventColor, eventType } from './event-types'
 import { fullDate, km } from './format'
-import { partialLines } from './geometry'
+import { linesBetween, pointsAlong } from './geometry'
 import { app, type Track } from './state.svelte'
 import type { TrackCollection } from './track-types'
 
 const SOURCE = 'tracks'
 const LAYER = 'tracks'
+const HEAT = 'heat'
 const PLAYBACK = 'playback'
+const HEADS = 'playback-heads'
 // Pixels around the cursor in which a track counts as hovered, since the lines are thin
 const HIT_RADIUS = 4
+// Kilometers between the points a track adds to the heat map
+const HEAT_STEP = 0.02
+// Seconds of riding the comet tail of a ride being played covers, and the steps it tapers in
+const TAIL = 720
+const TAIL_STEPS = 6
+// The ride being played on top of the heat map, in a color its ramp never uses
+const LIVE = { light: '#1f4fbf', dark: '#7ea6f4' }
+// Outline that keeps the ride being played apart from the lines it crosses
+const CASING = { light: '#ffffff', dark: '#111111' }
+
+export interface TrackStyle {
+  dark: boolean
+  /** Finished rides as a heat map */
+  heat: boolean
+  /** Whether a moment is being played back, rather than all rides shown */
+  playing: boolean
+}
 
 // The track whose hover feature-state is set
 let hovered: number | null = null
 
-function color(dark: boolean): ExpressionSpecification {
+function typeColor(dark: boolean): ExpressionSpecification {
   const pick = ({ color, dark: darkColor }: { color: string; dark: string }) => (dark ? darkColor : color)
   return [
     'match',
@@ -26,12 +45,33 @@ function color(dark: boolean): ExpressionSpecification {
   ] as unknown as ExpressionSpecification
 }
 
+const heatPointsCache = new WeakMap<TrackCollection, FeatureCollection<Point>>()
+
+function heatPoints(collection: TrackCollection): FeatureCollection<Point> {
+  let points = heatPointsCache.get(collection)
+  if (!points) {
+    points = {
+      type: 'FeatureCollection',
+      features: collection.features.flatMap((feature) =>
+        pointsAlong(feature.geometry.coordinates, HEAT_STEP).map((coordinates) => ({
+          type: 'Feature' as const,
+          properties: { osm: feature.properties.osm },
+          geometry: { type: 'Point' as const, coordinates },
+        })),
+      ),
+    }
+    heatPointsCache.set(collection, points)
+  }
+  return points
+}
+
 /**
- * Adds the tracks as lines colored by event type, initially all hidden. Needs to be called again
- * after the map style changes, since that removes all sources and layers.
+ * Adds the tracks as lines and as a heat map, initially all hidden, and the layers for playback.
+ * Needs to be called again after the map style changes, since that removes all sources and layers.
  */
-export function addTrackLayers(map: maplibregl.Map, collection: TrackCollection, dark: boolean) {
+export function addTrackLayers(map: maplibregl.Map, collection: TrackCollection) {
   map.addSource(SOURCE, { type: 'geojson', data: collection, promoteId: 'osm' })
+  map.addSource(HEAT, { type: 'geojson', data: heatPoints(collection) })
   map.addSource(PLAYBACK, { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
 
   // Draw the tracks above all streets but below the labels that follow them, so street names stay
@@ -39,38 +79,104 @@ export function addTrackLayers(map: maplibregl.Map, collection: TrackCollection,
   const layers = map.getStyle().layers
   const lastNonSymbol = layers.findLastIndex((layer) => layer.type !== 'symbol')
   const firstSymbol = layers[lastNonSymbol + 1]?.id
-  const hover: ExpressionSpecification = ['boolean', ['feature-state', 'hover'], false]
+  const none: ExpressionSpecification = ['in', ['get', 'osm'], ['literal', []]]
   map.addLayer(
     {
-      id: LAYER,
-      type: 'line',
-      source: SOURCE,
-      filter: ['in', ['get', 'osm'], ['literal', []]],
-      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      id: HEAT,
+      type: 'heatmap',
+      source: HEAT,
+      filter: none,
+      layout: { visibility: 'none' },
       paint: {
-        'line-color': color(dark),
-        // Lines on the dark map need more opacity to stand out as much
-        'line-opacity': ['case', hover, 0.95, dark ? 0.45 : 0.35],
-        'line-width': ['interpolate', ['linear'], ['zoom'], 10, ['case', hover, 3, 1.5], 16, ['case', hover, 7, 4]],
+        // A single ride stays faint yellow, routes ridden often turn red
+        'heatmap-color': [
+          'interpolate',
+          ['linear'],
+          ['heatmap-density'],
+          0,
+          'rgba(255, 220, 120, 0)',
+          0.08,
+          'rgba(255, 214, 110, 0.6)',
+          0.3,
+          '#fd9a4a',
+          0.55,
+          '#f0592b',
+          0.8,
+          '#c81e2c',
+          1,
+          '#8c0a3c',
+        ],
+        'heatmap-radius': ['interpolate', ['exponential', 1.6], ['zoom'], 10, 3, 16, 24],
+        'heatmap-intensity': ['interpolate', ['linear'], ['zoom'], 10, 0.05, 16, 0.25],
+        'heatmap-opacity': 0.85,
       },
     },
     firstSymbol,
   )
+  map.addLayer(
+    { id: LAYER, type: 'line', source: SOURCE, filter: none, layout: { 'line-join': 'round', 'line-cap': 'round' } },
+    firstSymbol,
+  )
+  // Colors, widths and order come with each feature, see drawPlayback
   map.addLayer(
     {
       id: PLAYBACK,
       type: 'line',
       source: PLAYBACK,
-      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      filter: ['==', ['geometry-type'], 'LineString'],
+      layout: { 'line-join': 'round', 'line-cap': 'round', 'line-sort-key': ['get', 'z'] },
       paint: {
-        'line-color': color(dark),
-        'line-opacity': 0.95,
-        'line-width': ['interpolate', ['linear'], ['zoom'], 10, 3, 16, 7],
+        'line-color': ['get', 'color'],
+        'line-opacity': ['get', 'opacity'],
+        'line-blur': ['get', 'blur'],
+        'line-width': ['interpolate', ['linear'], ['zoom'], 10, ['*', 0.8, ['get', 'width']], 16, ['*', 1.8, ['get', 'width']]],
       },
     },
     firstSymbol,
   )
+  // Where the riders are at the moment shown
+  map.addLayer({
+    id: HEADS,
+    type: 'circle',
+    source: PLAYBACK,
+    filter: ['==', ['geometry-type'], 'Point'],
+    paint: {
+      'circle-color': ['get', 'color'],
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 4, 16, 7],
+      'circle-stroke-color': ['get', 'stroke'],
+      'circle-stroke-width': 2,
+    },
+  })
   hovered = null
+}
+
+/**
+ * Colors the finished rides: in their type colors, or during playback in grey (faint sand on the
+ * dark map, where grey and white look like streets) so the ride being played stands out, or as a
+ * heat map. Hovered rides always show.
+ */
+export function styleTracks(map: maplibregl.Map, { dark, heat, playing }: TrackStyle) {
+  const hover: ExpressionSpecification = ['boolean', ['feature-state', 'hover'], false]
+  const types = typeColor(dark)
+  const muted = playing && !heat
+  const [color, opacity]: [ExpressionSpecification | string, number] = heat
+    ? [types, 0]
+    : muted
+      ? [dark ? '#e8c9a0' : '#76736b', dark ? 0.3 : 0.32]
+      : // Lines on the dark map need more opacity to stand out as much
+        [types, dark ? 0.45 : 0.35]
+  map.setPaintProperty(LAYER, 'line-color', ['case', hover, types, color])
+  map.setPaintProperty(LAYER, 'line-opacity', ['case', hover, 0.95, opacity])
+  map.setPaintProperty(LAYER, 'line-width', [
+    'interpolate',
+    ['linear'],
+    ['zoom'],
+    10,
+    ['case', hover, 3, muted ? 1.2 : 1.5],
+    16,
+    ['case', hover, 7, muted ? 3 : 4],
+  ])
+  map.setLayoutProperty(HEAT, 'visibility', heat ? 'visible' : 'none')
 }
 
 /** Hover highlighting and a popup on click; call once per map */
@@ -109,7 +215,9 @@ export function bindTrackEvents(map: maplibregl.Map) {
 
 /** Shows only the tracks with the given ids */
 export function showTracks(map: maplibregl.Map, ids: number[]) {
-  map.setFilter(LAYER, ['in', ['get', 'osm'], ['literal', ids]])
+  const filter: ExpressionSpecification = ['in', ['get', 'osm'], ['literal', ids]]
+  map.setFilter(LAYER, filter)
+  map.setFilter(HEAT, filter)
 }
 
 export function highlightTrack(map: maplibregl.Map, id: number | null) {
@@ -118,17 +226,54 @@ export function highlightTrack(map: maplibregl.Map, id: number | null) {
   hovered = id
 }
 
-/** Draws the first `progress` (0–1) of a track on top of the others, or nothing */
-export function drawPlayback(map: maplibregl.Map, track: Track | null, progress: number) {
-  const features: Feature<MultiLineString>[] = track
-    ? [
-        {
-          type: 'Feature',
-          properties: { type: track.type },
-          geometry: { type: 'MultiLineString', coordinates: partialLines(track.coordinates, progress) },
-        },
-      ]
-    : []
+/**
+ * Draws the rides being played as far as they got at `time`, with a dot where the riders are. On the
+ * light map the last minutes form a tapering comet tail, on the dark one the ride glows, and on the
+ * heat map it is blue with an outline.
+ */
+export function drawPlayback(map: maplibregl.Map, tracks: Track[], time: number | null, { dark, heat }: TrackStyle) {
+  const features: Feature[] = []
+  const draw = (lines: Position[][], properties: { color: string; width: number; opacity?: number; blur?: number }) => {
+    if (lines.length === 0) return
+    features.push({
+      type: 'Feature',
+      properties: { opacity: 1, blur: 0, z: features.length, ...properties },
+      geometry: { type: 'MultiLineString', coordinates: lines },
+    })
+  }
+  const theme = dark ? 'dark' : 'light'
+
+  for (const track of time === null ? [] : tracks) {
+    const seconds = (time! - track.from) / 1000
+    const ridden = linesBetween(track.coordinates, -Infinity, seconds)
+    const color = heat ? LIVE[theme] : eventType(track.type)[dark ? 'dark' : 'color']
+    if (heat) {
+      draw(ridden, { color: CASING[theme], width: 8 })
+      draw(ridden, { color, width: 4 })
+    } else if (dark) {
+      draw(ridden, { color, width: 10, opacity: 0.6, blur: 6 })
+      draw(ridden, { color, width: 3.5 })
+    } else {
+      draw(linesBetween(ridden, -Infinity, seconds - TAIL), { color, width: 3, opacity: 0.4 })
+      draw(linesBetween(ridden, seconds - TAIL, seconds), { color: CASING[theme], width: 8.5 })
+      for (let step = 1; step <= TAIL_STEPS; step++) {
+        const from = seconds - TAIL + (TAIL / TAIL_STEPS) * (step - 1)
+        draw(linesBetween(ridden, from, from + TAIL / TAIL_STEPS), {
+          color,
+          width: 3 + (2.5 * step) / TAIL_STEPS,
+          opacity: 0.45 + (0.55 * step) / TAIL_STEPS,
+        })
+      }
+    }
+    const head = ridden.at(-1)?.at(-1)
+    if (head) {
+      features.push({
+        type: 'Feature',
+        properties: { color, stroke: CASING[theme] },
+        geometry: { type: 'Point', coordinates: head },
+      })
+    }
+  }
   ;(map.getSource(PLAYBACK) as maplibregl.GeoJSONSource).setData({ type: 'FeatureCollection', features })
 }
 

@@ -19,7 +19,6 @@
     "@types/geojson": "^7946.0.16",
     "@types/node": "^24.19.2",
     "@xmldom/xmldom": "^0.9.12",
-    "simplify-js": "^1.2.4",
     "svelte": "^5.57.3",
     "svelte-check": "^4.7.7",
     "typescript": "~6.0.3",

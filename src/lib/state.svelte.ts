@@ -1,5 +1,5 @@
-// State shared by the map, the sidebar and the timeline. The time range and the hidden tracks are
-// kept in the query string, the map position in the hash (by MapLibre).
+// State shared by the map, the sidebar and the timeline. The hidden tracks are kept in the query
+// string, the map position in the hash (by MapLibre).
 
 import type { Map } from 'maplibre-gl'
 import type { Position } from 'geojson'
@@ -7,31 +7,43 @@ import { SvelteSet } from 'svelte/reactivity'
 import type { BBox, City, TrackCollection, TrackProperties } from './track-types'
 
 export interface Track extends TrackProperties {
+  /** [lon, lat, seconds since the start] */
   coordinates: Position[][]
+  /** Start and end in milliseconds */
+  from: number
+  to: number
 }
 
-/** Inclusive range of months, as "YYYY-MM" */
-export interface MonthRange {
-  from: string
-  to: string
+export interface TimeSpan {
+  from: number
+  to: number
 }
 
-// Seconds to draw one track during playback at 1×, and the pause after it (in the same unit)
-const DRAW_SECONDS = 1.2
-const HOLD = 0.25
-const MONTH = /^\d{4}-\d{2}$/
+const DAY = 86_400_000
+/** Seconds of riding per second of playback offered in the speed menu */
+export const SPEEDS = [1, 10, 60, 300, 1200, 3600]
+export const MAX_SPEED = 86_400
+// Pause in milliseconds after the rides of one evening, before playback skips to the next ones
+const HOLD = 1000
+// Smallest time span the timeline zooms in to
+const MIN_SPAN = 10 * 60_000
 const SIDEBAR_KEY = 'sidebar'
+const HEAT_KEY = 'heat'
 
-function storedSidebar(): boolean {
+function stored(key: string): string | null {
   try {
-    return localStorage.getItem(SIDEBAR_KEY) !== 'closed'
+    return localStorage.getItem(key)
   } catch {
-    return true
+    return null
   }
 }
 
-export function trackMonth(track: Track): string {
-  return (track.start ?? '').slice(0, 7)
+function store(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    // Without storage the choice only lasts for this page view
+  }
 }
 
 function intersects(a: BBox, b: BBox): boolean {
@@ -41,24 +53,30 @@ function intersects(a: BBox, b: BBox): boolean {
 class AppState {
   collection = $state.raw<TrackCollection | null>(null)
   tracks: Track[] = $derived(
-    this.collection?.features.map((feature) => ({ ...feature.properties, coordinates: feature.geometry.coordinates })) ?? [],
+    this.collection?.features.map((feature) => ({
+      ...feature.properties,
+      coordinates: feature.geometry.coordinates,
+      from: Date.parse(feature.properties.start),
+      to: Date.parse(feature.properties.end),
+    })) ?? [],
   )
   cities: City[] = $derived(this.collection?.cities ?? [])
 
   /** OSM ids of the tracks the user unchecked */
   hidden = new SvelteSet<number>()
-  range = $state<MonthRange | null>(null)
   /** The visible part of the map */
   bounds = $state.raw<BBox | null>(null)
   hovered = $state<number | null>(null)
-  sidebarOpen = $state(storedSidebar())
+  sidebarOpen = $state(stored(SIDEBAR_KEY) !== 'closed')
+  /** Show the finished rides as a heat map instead of lines in their type colors */
+  heat = $state(stored(HEAT_KEY) === 'on')
   map: Map | null = null
 
-  /** Tracks in the map view and the time range: the ones the sidebar lists */
-  listed = $derived(this.tracks.filter((track) => this.inView(track) && this.inRange(track)))
+  /** Tracks in the map view: the ones the sidebar lists */
+  listed = $derived(this.tracks.filter((track) => this.inView(track)))
   selected = $derived(this.listed.filter((track) => !this.hidden.has(track.osm)))
   /** Tracks drawn on the map while not playing; ones outside the view are clipped by the map anyway */
-  drawn = $derived(this.tracks.filter((track) => !this.hidden.has(track.osm) && this.inRange(track)))
+  drawn = $derived(this.tracks.filter((track) => !this.hidden.has(track.osm)))
 
   /** The city at the center of the map view, if any */
   city = $derived.by(() => {
@@ -69,40 +87,60 @@ class AppState {
     return this.cities.find(({ bbox }) => intersects(bbox, [x, y, x, y])) ?? null
   })
 
-  // Playback: the tracks being played, the one being drawn and how far (0–1, then the hold)
-  queue = $state.raw<Track[]>([])
-  index = $state(-1)
-  progress = $state(0)
-  playing = $state(false)
-  speed = $state(1)
-  current = $derived(this.index >= 0 ? (this.queue[this.index] ?? null) : null)
+  /** All tracks, with a month of space on both sides */
+  extent: TimeSpan = $derived.by(() => {
+    if (this.tracks.length === 0) return { from: 0, to: 1 }
+    return {
+      from: Math.min(...this.tracks.map((track) => track.from)) - 31 * DAY,
+      to: Math.max(...this.tracks.map((track) => track.to)) + 31 * DAY,
+    }
+  })
+  /** The part of the timeline zoomed in to, or null for all of it */
+  view = $state.raw<TimeSpan | null>(null)
+  domain: TimeSpan = $derived(this.view ?? this.extent)
 
-  /** Totals of the selected rides, or while playing, of the part drawn so far */
+  // Playback: the moment shown on the map, or null to show all tracks
+  time = $state<number | null>(null)
+  playing = $state(false)
+  speed = $state(1200)
+  /** Tracks underway at the playback time, drawn as far as they got */
+  riding = $derived(this.time === null ? [] : this.drawn.filter((track) => track.from <= this.time! && this.time! < track.to))
+  /** Tracks drawn in full: all of them, or while playing back, the ones finished */
+  finished = $derived(this.time === null ? this.drawn : this.drawn.filter((track) => track.to <= this.time!))
+
+  /** Spans of time in which at least one selected ride is underway, in order */
+  sessions = $derived.by(() => {
+    const result: TimeSpan[] = []
+    for (const track of this.selected.toSorted((a, b) => a.from - b.from)) {
+      const last = result.at(-1)
+      if (last && track.from <= last.to) last.to = Math.max(last.to, track.to)
+      else result.push({ from: track.from, to: track.to })
+    }
+    return result
+  })
+
+  /** Totals of the selected rides, or while playing back, of the part ridden by then */
   totals = $derived.by(() => {
-    if (!this.current) {
+    const time = this.time
+    if (time === null) {
       return {
         rides: this.selected.length,
         km: this.selected.reduce((sum, track) => sum + track.km, 0),
         minutes: this.selected.reduce((sum, track) => sum + track.minutes, 0),
       }
     }
-    const done = this.queue.slice(0, this.index)
-    const drawn = Math.min(1, this.progress)
+    const started = this.selected.filter((track) => track.from <= time)
+    const ridden = (track: Track) => Math.min(1, (time - track.from) / (track.to - track.from))
     return {
-      rides: this.index + 1,
-      km: done.reduce((sum, track) => sum + track.km, 0) + this.current.km * drawn,
-      minutes: done.reduce((sum, track) => sum + track.minutes, 0) + this.current.minutes * drawn,
+      rides: started.length,
+      km: started.reduce((sum, track) => sum + track.km * ridden(track), 0),
+      minutes: started.reduce((sum, track) => sum + track.minutes * ridden(track), 0),
     }
   })
   #generation = 0
 
   inView(track: Track): boolean {
     return !this.bounds || intersects(track.bbox, this.bounds)
-  }
-
-  inRange(track: Track): boolean {
-    const month = trackMonth(track)
-    return !this.range || (month >= this.range.from && month <= this.range.to)
   }
 
   async load(url: string) {
@@ -120,39 +158,66 @@ class AppState {
 
   toggleSidebar() {
     this.sidebarOpen = !this.sidebarOpen
-    try {
-      localStorage.setItem(SIDEBAR_KEY, this.sidebarOpen ? 'open' : 'closed')
-    } catch {
-      // Without storage the choice only lasts for this page view
-    }
+    store(SIDEBAR_KEY, this.sidebarOpen ? 'open' : 'closed')
+  }
+
+  toggleHeat() {
+    this.heat = !this.heat
+    store(HEAT_KEY, this.heat ? 'on' : 'off')
   }
 
   showCity(city: City) {
     this.map?.fitBounds(city.bbox, { padding: 40, duration: 800 })
   }
 
+  /** Zooms the timeline to a time span, kept within all tracks and not shorter than MIN_SPAN */
+  zoomTo({ from, to }: TimeSpan) {
+    const extent = this.extent
+    const span = Math.min(extent.to - extent.from, Math.max(MIN_SPAN, to - from))
+    const start = Math.min(extent.to - span, Math.max(extent.from, (from + to) / 2 - span / 2))
+    this.view = span >= extent.to - extent.from ? null : { from: start, to: start + span }
+  }
+
+  seek(time: number) {
+    this.time = Math.min(this.extent.to, Math.max(this.extent.from, time))
+  }
+
   play() {
-    if (this.playing) return
-    if (this.index < 0) {
-      this.queue = this.selected
-      this.index = 0
-      this.progress = 0
+    if (this.playing || this.sessions.length === 0) return
+    let time = this.time
+    // Start over at the beginning of the timeline section in view
+    if (time === null || time >= this.sessions.at(-1)!.to || time < this.domain.from || time > this.domain.to) {
+      time = this.domain.from
     }
-    if (this.queue.length === 0) return
+    // Between rides, go straight to the next one
+    if (!this.sessions.some((session) => session.from <= time! && time! < session.to)) {
+      time = (this.sessions.find((session) => session.from > time!) ?? this.sessions[0]).from
+    }
+    this.time = time
     this.playing = true
 
     // A newer play() call, or pause() and stop(), ends this loop
     const generation = ++this.#generation
     let last = performance.now()
+    // When the playback reached a gap between rides
+    let holdSince: number | null = null
     const frame = (now: number) => {
-      if (generation !== this.#generation) return
-      this.progress += ((now - last) / 1000 / DRAW_SECONDS) * this.speed
-      last = now
-      if (this.progress >= 1 + HOLD) {
-        this.progress = 0
-        this.index += 1
+      if (generation !== this.#generation || this.time === null) return
+      const time = this.time
+      const session = this.sessions.find((session) => session.from <= time && time < session.to)
+      if (session) {
+        holdSince = null
+        this.time = Math.min(session.to, time + Math.max(0, now - last) * this.speed)
+      } else {
+        holdSince ??= now
+        if (now - holdSince >= HOLD) {
+          const next = this.sessions.find((session) => session.from > time)
+          if (!next) return this.pause()
+          this.time = next.from
+          holdSince = null
+        }
       }
-      if (this.index >= this.queue.length) return this.stop()
+      last = now
       requestAnimationFrame(frame)
     }
     requestAnimationFrame(frame)
@@ -165,30 +230,21 @@ class AppState {
 
   stop() {
     this.pause()
-    this.queue = []
-    this.index = -1
-    this.progress = 0
+    this.time = null
   }
 
-  /** Reads the time range and hidden tracks from the query string */
+  /** Reads the hidden tracks from the query string */
   readUrl() {
     const params = new URLSearchParams(location.search)
-    const from = params.get('from')
-    const to = params.get('to')
-    this.range = from && to && MONTH.test(from) && MONTH.test(to) ? { from, to } : null
     this.hidden.clear()
     for (const id of params.get('hide')?.split(',') ?? []) {
       if (/^\d+$/.test(id)) this.hidden.add(Number(id))
     }
   }
 
-  /** The query string for the time range and hidden tracks */
+  /** The query string for the hidden tracks */
   query(): string {
     const params = new URLSearchParams()
-    if (this.range) {
-      params.set('from', this.range.from)
-      params.set('to', this.range.to)
-    }
     if (this.hidden.size > 0) params.set('hide', [...this.hidden].sort((a, b) => a - b).join(','))
     // Keep the commas readable
     return params.size > 0 ? '?' + params.toString().replaceAll('%2C', ',') : ''

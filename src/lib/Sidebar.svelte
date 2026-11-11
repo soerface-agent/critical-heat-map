@@ -1,6 +1,6 @@
 <script lang="ts">
   import { EVENT_TYPES, eventColor } from './event-types'
-  import { dayMonth, duration, km, monthLabel, shortTitle } from './format'
+  import { dayMonth, duration, km, shortTitle } from './format'
   import { app, type Track } from './state.svelte'
 
   const total = (tracks: Track[]) => tracks.reduce((sum, track) => sum + track.km, 0)
@@ -32,16 +32,13 @@
     <div class="label">In this map view</div>
     <div class="total">{km(app.totals.km, 0)} km</div>
     <div class="meta">
-      {#if app.current}
-        {app.totals.rides} of {app.queue.length} rides drawn
+      {#if app.time !== null}
+        {app.totals.rides} of {app.selected.length} rides drawn
       {:else}
         {app.totals.rides} of {app.listed.length} rides
       {/if}
       · {Math.round(app.totals.minutes / 60)} h riding
     </div>
-    {#if app.range}
-      <div class="meta">{monthLabel(app.range.from)} – {monthLabel(app.range.to)}</div>
-    {/if}
 
     <div class="chips">
       {#each chips as chip (chip.label)}
@@ -66,7 +63,7 @@
 
   <div class="list">
     {#if app.collection && app.listed.length === 0}
-      <p class="empty">No rides in this part of the map or time range. Pick a city, zoom out, or clear the range.</p>
+      <p class="empty">No rides in this part of the map. Pick a city or zoom out.</p>
     {/if}
     {#each years as group (group.year)}
       <label class="year">
@@ -82,7 +79,7 @@
         <label
           class="ride"
           class:hidden
-          class:hot={app.hovered === track.osm || app.current?.osm === track.osm}
+          class:hot={app.hovered === track.osm || app.riding.includes(track)}
           onpointerenter={() => (app.hovered = track.osm)}
           onpointerleave={() => (app.hovered = null)}
         >

@@ -16,7 +16,9 @@ export interface TrackProperties {
   /** Page of the trace on openstreetmap.org */
   url: string
   /** ISO timestamp of the first track point */
-  start: string | null
+  start: string
+  /** ISO timestamp of the last track point */
+  end: string
   /** Distance ridden in km */
   km: number
   /** Minutes from the first to the last track point */
@@ -33,6 +35,7 @@ export interface City {
   bbox: BBox
 }
 
+/** Positions are [lon, lat, seconds since the start of the track] */
 export interface TrackCollection extends FeatureCollection<MultiLineString, TrackProperties> {
   cities: City[]
 }
