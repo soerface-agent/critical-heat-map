@@ -35,6 +35,7 @@ const MIN_SPAN = 10 * 60_000
 const SIDEBAR_KEY = 'sidebar'
 const HEAT_KEY = 'heat'
 const FOLLOW_KEY = 'follow'
+const THREE_D_KEY = '3d'
 
 function stored(key: string): string | null {
   try {
@@ -80,6 +81,8 @@ class AppState {
   heat = $state(stored(HEAT_KEY) === 'on')
   /** Keep the rides being played in the middle of the map */
   follow = $state(stored(FOLLOW_KEY) !== 'off')
+  /** Terrain, buildings and a tilted map */
+  threeD = $state(stored(THREE_D_KEY) === 'on')
   map: Map | null = null
 
   city = $derived(this.cities.find((city) => city.id === this.cityId) ?? null)
@@ -197,6 +200,11 @@ class AppState {
   toggleFollow() {
     this.follow = !this.follow
     store(FOLLOW_KEY, this.follow ? 'on' : 'off')
+  }
+
+  toggleThreeD() {
+    this.threeD = !this.threeD
+    store(THREE_D_KEY, this.threeD ? 'on' : 'off')
   }
 
   showCity(city: City) {

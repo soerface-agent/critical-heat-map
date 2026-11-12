@@ -11,6 +11,8 @@ import type { TrackCollection } from './track-types'
 const SOURCE = 'tracks'
 const LAYER = 'tracks'
 const HEAT = 'heat'
+/** The lowest of the track layers, which other layers can be put below */
+export const FIRST_TRACK_LAYER = HEAT
 const PLAYBACK = 'playback'
 const HEADS = 'playback-heads'
 // Pixels around the cursor in which a track counts as hovered, since the lines are thin

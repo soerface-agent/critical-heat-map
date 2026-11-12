@@ -6,7 +6,8 @@
   import type { Position } from 'geojson'
   import { app, type Track } from './state.svelte'
   import { theme } from './theme.svelte'
-  import { addTrackLayers, bindTrackEvents, drawPlayback, highlightTrack, showTracks, styleTracks, type TrackStyle } from './tracks'
+  import { MAX_PITCH, setThreeD, tilt } from './three-d'
+  import { FIRST_TRACK_LAYER, addTrackLayers, bindTrackEvents, drawPlayback, highlightTrack, showTracks, styleTracks, type TrackStyle } from './tracks'
 
   // MapLibre looks for its worker next to its own module, which Vite's dependency
   // pre-bundling moves, so point it at the worker file explicitly
@@ -34,7 +35,7 @@
   // Width of the world in pixels at zoom 0
   const WORLD_SIZE = 512
 
-  /** Buttons below the zoom controls that switch the heat map and following the riders on and off */
+  /** Buttons below the zoom controls that switch the heat map, following the riders and 3D on and off */
   class ToggleControl implements maplibregl.IControl {
     heat = this.button('Heat map', 'Show the rides as a heat map', ICON(
       '<path d="M10 18c3.3 0 5.5-2.3 5.5-5.4 0-3.4-2.6-5.2-3.6-8.6-1.9 1.3-2.6 3.3-2.4 5.2-1-.6-1.7-1.6-1.9-2.9C5.8 7.8 4.5 10 4.5 12.6 4.5 15.7 6.7 18 10 18z" stroke-linejoin="round"/>',
@@ -42,6 +43,9 @@
     follow = this.button('Follow the riders', 'Move the map along with the rides being played', ICON(
       '<circle cx="10" cy="10" r="5.5"/><circle cx="10" cy="10" r="1.6" fill="currentColor"/><path d="M10 1.5v3M10 15.5v3M1.5 10h3M15.5 10h3" stroke-linecap="round"/>',
     ), () => app.toggleFollow())
+    threeD = this.button('3D', 'Show terrain and buildings in 3D', ICON(
+      '<path d="M10 2.5l6.5 3.75v7.5L10 17.5l-6.5-3.75v-7.5z" stroke-linejoin="round"/><path d="M3.5 6.25L10 10l6.5-3.75M10 10v7.5" stroke-linejoin="round"/>',
+    ), () => app.toggleThreeD())
 
     button(label: string, title: string, icon: string, onclick: () => void) {
       const button = document.createElement('button')
@@ -56,7 +60,7 @@
     onAdd() {
       const group = document.createElement('div')
       group.className = 'maplibregl-ctrl maplibregl-ctrl-group toggle-control'
-      group.append(this.heat, this.follow)
+      group.append(this.heat, this.follow, this.threeD)
       return group
     }
 
@@ -71,6 +75,7 @@
   $effect(() => {
     toggleControl.heat.ariaPressed = String(app.heat)
     toggleControl.follow.ariaPressed = String(app.follow)
+    toggleControl.threeD.ariaPressed = String(app.threeD)
   })
   let map = $state.raw<maplibregl.Map | null>(null)
   /** Increases whenever a map style finished loading, which removes the track layers */
@@ -86,9 +91,11 @@
       style: styleUrl(untrack(() => theme.dark)),
       center: [9.4985241, 51.3156676],
       zoom: 12,
+      // So a tilted map in the hash stays as steep
+      maxPitch: untrack(() => (app.threeD ? MAX_PITCH.terrain : MAX_PITCH.flat)),
       hash: true,
     })
-    instance.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right')
+    instance.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right')
     instance.addControl(toggleControl, 'top-right')
     instance.addControl(new maplibregl.ScaleControl(), 'bottom-right')
 
@@ -151,6 +158,19 @@
     if (map && styleLoads > 0 && app.collection) {
       addTrackLayers(map, app.collection)
       layers = untrack(() => layers) + 1
+    }
+  })
+
+  $effect(() => {
+    if (map && layers) setThreeD(map, app.threeD, theme.dark, FIRST_TRACK_LAYER)
+  })
+
+  // Tilt the map on switching 3D on or off, and when the page loads with it on but a flat map
+  let currentThreeD = false
+  $effect(() => {
+    if (map && app.threeD !== currentThreeD) {
+      currentThreeD = app.threeD
+      tilt(map, currentThreeD)
     }
   })
 
@@ -263,7 +283,7 @@
   })
 </script>
 
-<div class="map" bind:this={container}></div>
+<div class="map" class:flat={!app.threeD} bind:this={container}></div>
 
 <style>
   .map :global(.toggle-control button) {
@@ -276,6 +296,11 @@
   .map :global(.toggle-control button[aria-pressed='true']) {
     background: var(--accent-soft);
     color: var(--accent);
+  }
+
+  /* The compass only helps on a map that can be turned and tilted */
+  .map.flat :global(.maplibregl-ctrl-compass) {
+    display: none;
   }
 
   .map {
