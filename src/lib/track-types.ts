@@ -23,6 +23,8 @@ export interface TrackProperties {
   km: number
   /** Minutes from the first to the last track point */
   minutes: number
+  /** Median elevation in m of each minute from the start, empty if the track has none */
+  elevation: number[]
   bbox: BBox
   /** Id of the city the track belongs to, see TrackCollection.cities */
   city: string

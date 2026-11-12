@@ -123,9 +123,32 @@ function simplifyLine(line: Position[]): Position[] {
   return line.filter((_, i) => keep[i]).map(([x, y, t]) => [Math.round(x * factor) / factor, Math.round(y * factor) / factor, t])
 }
 
+/**
+ * The median elevation of the points recorded in each minute from `start`, in whole meters. A minute
+ * without points gets the one before. Empty if the points have no elevation.
+ */
+function elevationProfile(points: Position[], start: number): number[] {
+  const minutes: number[][] = []
+  for (const [, , time, elevation] of points) {
+    if (elevation !== undefined) (minutes[Math.floor((time - start) / 60000)] ??= []).push(elevation)
+  }
+  const profile: number[] = []
+  for (const values of minutes) {
+    if (!values) {
+      profile.push(profile.at(-1) ?? NaN)
+      continue
+    }
+    values.sort((a, b) => a - b)
+    profile.push(Math.round(values[Math.floor(values.length / 2)]))
+  }
+  // Minutes before the first recorded elevation
+  const first = profile.find((value) => !Number.isNaN(value))
+  return first === undefined ? [] : profile.map((value) => (Number.isNaN(value) ? first : value))
+}
+
 async function buildTrack(entry: TrackEntry): Promise<Feature<MultiLineString, TrackProperties>> {
   const doc = new DOMParser().parseFromString(await loadGpx(entry.osm), 'text/xml')
-  // Positions with the time they were recorded at, in milliseconds
+  // Positions with the time they were recorded at, in milliseconds, and the elevation if recorded
   const lines: Position[][] = []
 
   for (const feature of gpx(doc as unknown as Parameters<typeof gpx>[0]).features) {
@@ -139,9 +162,10 @@ async function buildTrack(entry: TrackEntry): Promise<Feature<MultiLineString, T
 
     for (const part of parts) {
       // Points without a time can't be played back
-      const line = part.coordinates.flatMap(([lon, lat], i) => {
+      const line = part.coordinates.flatMap(([lon, lat, elevation], i) => {
         const time = part.times[i]
-        return typeof time === 'string' ? [[lon, lat, Date.parse(time)]] : []
+        if (typeof time !== 'string') return []
+        return elevation === undefined ? [[lon, lat, Date.parse(time)]] : [[lon, lat, Date.parse(time), elevation]]
       })
       if (line.length >= 2) lines.push(line)
     }
@@ -165,6 +189,7 @@ async function buildTrack(entry: TrackEntry): Promise<Feature<MultiLineString, T
       end: new Date(end).toISOString(),
       km: Math.round(lines.reduce((sum, line) => sum + lineKm(line), 0) * 10) / 10,
       minutes: Math.round((end - start) / 60000),
+      elevation: elevationProfile(lines.flat(), start),
       bbox: bboxOf(lines.flat()).map(round) as BBox,
       // Filled in by assignCities
       city: '',

@@ -12,6 +12,9 @@ export interface Track extends TrackProperties {
   /** Start and end in milliseconds */
   from: number
   to: number
+  /** Lowest and highest point in m, NaN without elevations */
+  low: number
+  high: number
 }
 
 export interface TimeSpan {
@@ -60,6 +63,8 @@ class AppState {
       coordinates: feature.geometry.coordinates,
       from: Date.parse(feature.properties.start),
       to: Date.parse(feature.properties.end),
+      low: feature.properties.elevation.length > 0 ? Math.min(...feature.properties.elevation) : NaN,
+      high: feature.properties.elevation.length > 0 ? Math.max(...feature.properties.elevation) : NaN,
     })) ?? [],
   )
   cities: City[] = $derived(this.collection?.cities ?? [])

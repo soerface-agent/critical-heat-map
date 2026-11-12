@@ -4,11 +4,20 @@
   import { MONTHS, dateTime, fullDate, km, shortTitle } from './format'
   import SpeedMenu from './SpeedMenu.svelte'
   import { app, type TimeSpan, type Track } from './state.svelte'
+  import { highestBetween } from './terrain'
 
-  // Pixels the pointer has to move before a press on the timeline becomes a brush
-  const BRUSH_THRESHOLD = 5
+  // Pixels the pointer has to move before a press on the timeline becomes a drag
+  const DRAG_THRESHOLD = 5
+  // A click on a bar at least this wide jumps to where it was clicked, on a narrower one to its start
+  const WIDE_BAR = 40
   // Pixels between labels on the time axis, at least
   const TICK_SPACING = 80
+  // A bar is as high as the terrain: each column of COLUMN pixels shows the highest point ridden in
+  // its time, scaled from the lowest to the highest point of the rides on the timeline. FLOOR pixels
+  // under the lowest point keep every ride visible, HEADROOM pixels stay free above the highest
+  const COLUMN = 2
+  const FLOOR = 3
+  const HEADROOM = 4
   const MINUTE = 60_000
   const HOUR = 60 * MINUTE
   const DAY = 24 * HOUR
@@ -72,6 +81,7 @@
   let bars: HTMLDivElement
   let axis: HTMLDivElement
   let width = $state(0)
+  let height = $state(0)
   let domain = $derived(app.domain)
   let span = $derived(domain.to - domain.from)
 
@@ -88,7 +98,61 @@
   })
 
   let shownTracks = $derived(app.tracks.filter((track) => track.to >= domain.from && track.from <= domain.to))
-  let hovered = $derived(shownTracks.find((track) => track.osm === app.hovered))
+
+  /**
+   * Lowest and highest point of the rides on the timeline that are in the map view (or of all on
+   * the timeline, if none is), rounded to 10 m. Rides elsewhere, e.g. in a lower city, are cut off
+   * at the bottom. The lowest point is the 1st percentile, so a few minutes of bad GPS altitude
+   * don't flatten all the other rides
+   */
+  let scale = $derived.by(() => {
+    const profiled = shownTracks.filter((track) => track.elevation.length > 0)
+    const inView = profiled.filter((track) => app.inView(track))
+    const tracks = inView.length > 0 ? inView : profiled
+    if (tracks.length === 0) return null
+    const elevations = tracks.flatMap((track) => track.elevation).sort((a, b) => a - b)
+    return {
+      low: Math.floor(elevations[Math.floor(elevations.length * 0.01)] / 10) * 10,
+      high: Math.ceil(elevations.at(-1)! / 10) * 10,
+    }
+  })
+
+  /**
+   * The bars in pixels: their box, and the outline of the terrain within it. A ride too short to
+   * show its profile becomes one column of the minimum width, as high as its highest point.
+   */
+  let shapes = $derived.by(() => {
+    // Like the minimum width in the CSS before, narrower on phones
+    const minWidth = width < 600 ? 5 : 9
+    const x = (time: number) => ((time - domain.from) / span) * width
+    const time = (x: number) => domain.from + (x / width) * span
+    const y = (elevation: number) =>
+      // Tracks without elevations are drawn half as high as the plot
+      scale && !Number.isNaN(elevation)
+        ? height - FLOOR - (Math.max(0, elevation - scale.low) / Math.max(1, scale.high - scale.low)) * (height - FLOOR - HEADROOM)
+        : height / 2
+
+    return shownTracks.map((track) => {
+      let [left, right] = [x(track.from), x(track.to)]
+      const tops: [number, number][] = []
+      if (right - left < minWidth) {
+        ;[left, right] = [(left + right - minWidth) / 2, (left + right + minWidth) / 2]
+        tops.push([left, y(track.high)], [right, y(track.high)])
+      } else {
+        // Only the part on screen
+        ;[left, right] = [Math.max(left, -COLUMN), Math.min(right, width + COLUMN)]
+        for (let start = left; start < right; start += COLUMN) {
+          const end = Math.min(right, start + COLUMN)
+          const top = y(highestBetween(track, time(start), time(end)))
+          tops.push([start, top], [end, top])
+        }
+      }
+      const top = Math.min(...tops.map(([, y]) => y))
+      const [w, h] = [right - left, height - top]
+      const path = tops.map(([x, y]) => `L${(x - left).toFixed(1)},${(y - top).toFixed(1)}`).join('')
+      return { track, left, top, width: w, height: h, d: `M0,${h.toFixed(1)}${path}L${w.toFixed(1)},${h.toFixed(1)}Z` }
+    })
+  })
   /** Without playback, the playhead waits after the last ride, where everything is drawn */
   let playhead = $derived(app.time ?? Math.max(...app.tracks.map((track) => track.to)))
   let riding = $derived(app.riding.find((track) => app.selected.includes(track)) ?? app.riding[0])
@@ -125,42 +189,113 @@
     return () => axis.removeEventListener('wheel', wheel)
   })
 
-  // A press on the timeline seeks there, dragging across it zooms in to the brushed span
-  let press: { x: number; rect: DOMRect; onBar: boolean; active: boolean } | null = null
+  // A press on the timeline seeks there. Dragging moves the timeline, or with Shift, zooms in to
+  // the brushed span. Two fingers pinch to zoom
+  type Press = {
+    x: number
+    rect: DOMRect
+    domain: TimeSpan
+    onBar: boolean
+    mode: 'click' | 'pan' | 'brush' | 'pinch'
+    shift: boolean
+  }
+  let press: Press | null = null
+  /** Whether the last press moved the timeline or brushed, so the click that follows it is no seek */
+  let moved = false
+  /** Where the pointers on the timeline are, by pointer id */
+  const pointers = new Map<number, number>()
+  /** Where the two fingers of a pinch started and the time under each */
+  let pinch: { x: number; time: number }[] = []
   let brush = $state.raw<TimeSpan | null>(null)
+  let dragging = $state(false)
 
   function pressStart(event: PointerEvent) {
     if (event.button !== 0) return
+    pointers.set(event.pointerId, event.clientX)
+    const rect = bars.getBoundingClientRect()
+    if (pointers.size === 2 && press) {
+      // A second finger turns any press into a pinch
+      brush = null
+      for (const id of pointers.keys()) bars.setPointerCapture(id)
+      pinch = [...pointers.values()].map((x) => ({ x, time: timeAt(x, rect) }))
+      press = { ...press, rect, domain, mode: 'pinch' }
+      moved = true
+      dragging = true
+      return
+    }
+    if (pointers.size > 1) return
     const onBar = (event.target as Element).closest('.bar') !== null
-    press = { x: event.clientX, rect: bars.getBoundingClientRect(), onBar, active: false }
+    moved = false
+    press = { x: event.clientX, rect, domain, onBar, mode: 'click', shift: event.shiftKey }
   }
 
   function pressMove(event: PointerEvent) {
-    if (!press) return
-    if (!press.active) {
-      // A short movement is a click, not a brush
-      if (Math.abs(event.clientX - press.x) < BRUSH_THRESHOLD) return
-      press.active = true
+    if (!press || !pointers.has(event.pointerId)) return
+    pointers.set(event.pointerId, event.clientX)
+    const { rect } = press
+    if (press.mode === 'pinch') {
+      const [a, b] = pinch.map((finger, i) => ({ ...finger, now: [...pointers.values()][i] }))
+      if (Math.abs(b.now - a.now) < 10) return
+      // Keep the time under each finger under it
+      const newSpan = ((b.time - a.time) / (b.now - a.now)) * rect.width
+      const from = a.time - ((a.now - rect.left) / rect.width) * newSpan
+      app.zoomTo({ from, to: from + newSpan })
+      return
+    }
+    if (press.mode === 'click') {
+      // A short movement is a click, not a drag
+      if (Math.abs(event.clientX - press.x) < DRAG_THRESHOLD) return
+      press.mode = press.shift ? 'brush' : 'pan'
+      moved = true
+      dragging = press.mode === 'pan'
       bars.setPointerCapture(event.pointerId)
     }
-    const [from, to] = [timeAt(press.x, press.rect), timeAt(event.clientX, press.rect)].sort((a, b) => a - b)
-    brush = { from, to }
+    if (press.mode === 'brush') {
+      const [from, to] = [timeAt(press.x, rect), timeAt(event.clientX, rect)].sort((a, b) => a - b)
+      brush = { from, to }
+    } else {
+      const shift = ((press.x - event.clientX) / rect.width) * (press.domain.to - press.domain.from)
+      app.zoomTo({ from: press.domain.from + shift, to: press.domain.to + shift })
+    }
   }
 
   function pressEnd(event: PointerEvent) {
-    if (press?.active && brush) app.zoomTo(brush)
-    // A click on a bar jumps to the start of the ride instead
-    else if (press && !press.onBar) app.seek(timeAt(event.clientX, press.rect))
+    pointers.delete(event.pointerId)
+    if (!press) return
+    if (press.mode === 'pinch') {
+      // The finger left on the timeline goes on moving it, from where it is now
+      const [x] = pointers.values()
+      if (x === undefined) return pressCancel()
+      press = { ...press, x, domain, rect: bars.getBoundingClientRect(), mode: 'pan' }
+      return
+    }
+    if (press.mode === 'brush' && brush) app.zoomTo(brush)
+    // A click on a bar is handled by the bar, see clickBar
+    else if (press.mode === 'click' && !press.onBar) app.seek(timeAt(event.clientX, press.rect))
     pressCancel()
   }
 
-  function pressCancel() {
+  function clickBar(event: MouseEvent, track: Track) {
+    if (moved) return
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+    // detail is 0 when the bar is pressed by keyboard
+    if (event.detail > 0 && rect.width >= WIDE_BAR) app.seek(timeAt(event.clientX, bars.getBoundingClientRect()))
+    else app.seek(track.from)
+  }
+
+  function pressCancel(event?: PointerEvent) {
+    if (event) pointers.delete(event.pointerId)
+    if (pointers.size > 0) return
     press = null
     brush = null
+    dragging = false
   }
 
   // Dragging the playhead pauses the playback until it is let go
   let scrub = $state.raw<{ rect: DOMRect; resume: boolean } | null>(null)
+
+  /** The ride hovered here or on the map, described in the status line unless one is being played */
+  let hovered = $derived(scrub || app.playing ? undefined : app.tracks.find((track) => track.osm === app.hovered))
 
   function scrubStart(event: PointerEvent) {
     if (event.button !== 0) return
@@ -242,18 +377,28 @@
 
   <div class="axis" bind:this={axis}>
     <div class="status">
-      {#if app.time !== null}
+      {#if hovered}
+        <span class="now">
+          <span class="dot" style:background={eventColor(hovered.type)}></span>
+          <span class="ride">
+            <strong>{shortTitle(hovered.title)}</strong>
+            {fullDate(hovered.start)} · {km(hovered.km)} km{Number.isNaN(hovered.high) ? '' : ` · ${hovered.low}–${hovered.high} m`}
+          </span>
+        </span>
+      {:else if app.time !== null}
         <strong class="clock">{dateTime(app.time)}</strong>
         {#if riding}
-          <span class="dot" style:background={eventColor(riding.type)}></span>
-          <span class="ride">
-            <strong>{shortTitle(riding.title)}</strong>
-            {km(riding.km * ridden(riding))} of {km(riding.km)} km{app.riding.length > 1 ? ` · ${app.riding.length - 1} more` : ''}
+          <span class="now">
+            <span class="dot" style:background={eventColor(riding.type)}></span>
+            <span class="ride">
+              <strong>{shortTitle(riding.title)}</strong>
+              {km(riding.km * ridden(riding))} of {km(riding.km)} km{app.riding.length > 1 ? ` · ${app.riding.length - 1} more` : ''}
+            </span>
           </span>
         {/if}
-        <span>ride {app.totals.rides} of {app.selected.length}, {km(app.totals.km, 0)} km so far</span>
+        <span class="totals">ride {app.totals.rides} of {app.selected.length}, {km(app.totals.km, 0)} km so far</span>
       {:else}
-        <span>Drag across the timeline or scroll on it to zoom. Click a ride or drag the playhead to jump in time.</span>
+        <span class="hint">Drag the timeline to move it, scroll or pinch to zoom, Shift-drag to zoom in on a span. Click a ride or drag the playhead to jump in time.</span>
       {/if}
       {#if app.view}
         <button type="button" class="show-all" onclick={() => (app.view = null)}>Reset zoom</button>
@@ -265,9 +410,12 @@
       <div
         class="bars"
         role="presentation"
-        title="Click to jump in time, drag to zoom in, double-click to zoom out"
+        class:zoomed={app.view !== null}
+        class:dragging
+        title="Click to jump in time, drag to move, Shift-drag to zoom in, double-click to zoom out"
         bind:this={bars}
         bind:clientWidth={width}
+        bind:clientHeight={height}
         onpointerdown={pressStart}
         onpointermove={pressMove}
         onpointerup={pressEnd}
@@ -280,7 +428,8 @@
         {#if brush}
           <div class="brush" style:left="{percent(brush.from)}%" style:width="{percent(brush.to) - percent(brush.from)}%"></div>
         {/if}
-        {#each shownTracks as track (track.osm)}
+        {#each shapes as bar (bar.track.osm)}
+          {@const track = bar.track}
           {@const shown = !app.hidden.has(track.osm)}
           {@const visible = app.inView(track)}
           <button
@@ -290,14 +439,20 @@
             class:visible
             class:faded={app.time !== null && track.from > app.time && visible && shown}
             class:hot={app.hovered === track.osm || app.riding.includes(track)}
-            style:left="{percent(track.from)}%"
-            style:width="max(var(--min-bar), {percent(track.to) - percent(track.from)}%)"
+            style:left="{bar.left}px"
+            style:top="{bar.top}px"
+            style:width="{bar.width}px"
             style:--color={eventColor(track.type)}
             aria-label="Jump to {track.title}, {km(track.km)} km{visible ? '' : ', outside the map view'}{shown ? '' : ', hidden'}"
-            onclick={() => app.seek(track.from)}
-            onpointerenter={() => (app.hovered = track.osm)}
+            onclick={(event) => clickBar(event, track)}
+            onpointerenter={(event) => {
+              // A finger doesn't hover, and the timeline captures it, so it would never leave
+              if (event.pointerType !== 'touch') app.hovered = track.osm
+            }}
             onpointerleave={() => (app.hovered = null)}
-          ></button>
+          >
+            <svg width={bar.width} height={bar.height} aria-hidden="true"><path d={bar.d} /></svg>
+          </button>
         {/each}
         {#if app.tracks.length > 0}
           <div
@@ -319,9 +474,10 @@
           ></div>
         {/if}
       </div>
-      {#if hovered && !scrub}
-        <div class="tip" style:left="{Math.min(100, Math.max(0, percent(hovered.from)))}%">
-          {shortTitle(hovered.title)} · {fullDate(hovered.start)} · {km(hovered.km)} km
+      {#if scale}
+        <div class="scale" title="Bar height: elevation above sea level">
+          <span style:top="{HEADROOM}px">{scale.high} m</span>
+          <span style:bottom="{FLOOR}px">{scale.low} m</span>
         </div>
       {/if}
     </div>
@@ -412,6 +568,7 @@
   }
 
   .axis {
+    --scale-width: 44px;
     display: flex;
     flex: 1;
     flex-direction: column;
@@ -438,7 +595,15 @@
     font-variant-numeric: tabular-nums;
   }
 
-  .ride {
+  .now {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .ride,
+  .totals {
     overflow: hidden;
     text-overflow: ellipsis;
   }
@@ -457,10 +622,10 @@
   .plot {
     position: relative;
     flex: 1;
+    margin-right: var(--scale-width);
   }
 
   .bars {
-    --min-bar: 9px;
     position: absolute;
     inset: 0;
     overflow: hidden;
@@ -468,6 +633,14 @@
     cursor: crosshair;
     touch-action: none;
     user-select: none;
+  }
+
+  .bars.zoomed {
+    cursor: grab;
+  }
+
+  .bars.dragging {
+    cursor: grabbing;
   }
 
   .brush {
@@ -486,34 +659,60 @@
     border-left: 1px dashed var(--border-strong);
   }
 
+  /* In the map view in its type color, hollow if unchecked, grey if elsewhere */
   .bar {
     position: absolute;
     bottom: 0;
-    height: 14px;
     padding: 0;
-    box-sizing: border-box;
-    background: var(--bar-muted);
-    border: 1.5px solid var(--bar-muted);
-    border-bottom: none;
-    border-radius: 3px 3px 0 0;
+    border: none;
+    background: none;
   }
 
-  .bar.visible {
-    height: 40px;
-    background: var(--surface);
-    border-color: var(--color);
+  .bar svg {
+    display: block;
+    overflow: visible;
   }
 
-  .bar.visible.shown {
-    background: var(--color);
+  .bar path {
+    fill: var(--bar-muted);
+    stroke-width: 1.5;
+    stroke-linejoin: round;
+  }
+
+  .bar.visible path {
+    fill: var(--surface);
+    stroke: var(--color);
+  }
+
+  .bar.visible.shown path {
+    fill: var(--color);
+    stroke: none;
   }
 
   .bar.faded {
     opacity: 0.3;
   }
 
-  .bar.hot {
-    border-color: var(--text);
+  .bar.hot path {
+    stroke: var(--text);
+  }
+
+  .scale {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: calc(100% + 6px);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-2);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .scale span {
+    position: absolute;
+    left: 0;
+    line-height: 1;
   }
 
   /* A wide grab area around a thin line with a knob on top */
@@ -559,22 +758,10 @@
     outline-offset: -2px;
   }
 
-  .tip {
-    position: absolute;
-    bottom: 46px;
-    padding: 4px 8px;
-    border-radius: 4px;
-    background: var(--text);
-    color: var(--surface);
-    font-size: 12px;
-    white-space: nowrap;
-    transform: translateX(-50%);
-    pointer-events: none;
-  }
-
   .ticks {
     position: relative;
     height: 22px;
+    margin-right: var(--scale-width);
     overflow: hidden;
   }
 
@@ -615,19 +802,43 @@
       flex: none;
     }
 
-    .bars {
-      --min-bar: 5px;
-    }
-
-    .bar.visible {
-      height: 32px;
-    }
-
+    /* Two lines of fixed height, clock and totals above the ride, so nothing moves while playing */
     .status {
-      flex-wrap: wrap;
+      display: grid;
+      grid-template:
+        'clock totals reset' 20px
+        'now now reset' 20px
+        / auto minmax(0, 1fr) auto;
+      column-gap: 8px;
+      height: 40px;
+    }
+
+    .clock {
+      grid-area: clock;
+    }
+
+    .totals {
+      grid-area: totals;
+    }
+
+    .now {
+      grid-area: now;
+    }
+
+    .status .show-all {
+      grid-area: reset;
+    }
+
+    .hint {
+      grid-row: 1 / 3;
+      grid-column: 1 / 3;
+      display: -webkit-box;
+      overflow: hidden;
       white-space: normal;
-      height: auto;
-      min-height: 28px;
+      line-height: 20px;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
     }
   }
 </style>
