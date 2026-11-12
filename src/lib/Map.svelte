@@ -332,7 +332,7 @@
   })
 </script>
 
-<div class="map" class:flat={!app.threeD} bind:this={container}></div>
+<div class="map" bind:this={container}></div>
 
 <style>
   .map :global(.toggle-control button) {
@@ -349,11 +349,6 @@
   .map :global(.toggle-control button[aria-pressed='true']) {
     background: var(--accent-soft);
     color: var(--accent);
-  }
-
-  /* The compass only helps on a map that can be turned and tilted */
-  .map.flat :global(.maplibregl-ctrl-compass) {
-    display: none;
   }
 
   .map {
