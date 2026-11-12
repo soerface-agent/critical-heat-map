@@ -276,11 +276,13 @@
       const seconds = Math.min(0.1, (now - last) / 1000)
       last = now
       frame = requestAnimationFrame(step)
-      if (riders.length === 0 || flying || instance.isMoving() || seconds === 0) return
+      // Following goes on during gestures, which moving the map doesn't stop, but not during
+      // animations, which it would
+      if (riders.length === 0 || flying || instance._camera.isMoving() || seconds === 0) return
 
       const tracks = riders.map(({ track }) => track)
-      // Not with the zoom level chosen by hand, which needs no move
-      const key = `${tracks.map((track) => track.osm).join(',')}|${app.speed}|${handZoom === null ? followZoom : 'hand'}`
+      // Not with the zoom level chosen by hand, which needs no move, and would stop the zooming
+      const key = `${tracks.map((track) => track.osm).join(',')}|${app.speed}|${followZoom}`
       const moved = plan?.key !== key
       if (moved) plan = planFor(tracks, key)
 

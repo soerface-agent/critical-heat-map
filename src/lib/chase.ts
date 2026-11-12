@@ -91,50 +91,33 @@ export function chase(map: maplibregl.Map, riders: () => Rider[], riderView: boo
   let direction: number | null = null
   let last = performance.now()
 
-  const byHand = (event: { originalEvent?: unknown }) => event.originalEvent !== undefined && !flying
-  /** The zoom level when zooming by hand started, null while not zooming by hand */
-  let zoomStart: number | null = null
-  const onZoom = () => {
-    if (zoomStart === null) return
-    const zoom = map.getZoom()
-    const out = zoom < zoomStart
-    zoomStart = null
-    if (riderView) {
-      if (!out) return
-      zoomStore.set(Math.min(zoom, RIDER_VIEW_ZOOM - ZOOM_BACK))
-      app.setRiderView(false)
-    } else if (zoom >= RIDER_VIEW_ZOOM && !out) {
-      zoomStore.set(RIDER_VIEW_ZOOM - ZOOM_BACK)
-      app.setRiderView(true)
-    } else {
-      zoomStore.set(zoom)
-    }
-  }
-  const onRotate = (event: maplibregl.MapLibreEvent<unknown>) => {
-    if (byHand(event as { originalEvent?: unknown }) && direction !== null) offset = turn(direction, map.getBearing())
-  }
-  const onPitch = (event: maplibregl.MapLibreEvent<unknown>) => {
-    if (byHand(event as { originalEvent?: unknown })) pitch = map.getPitch()
-  }
-  map.on('zoomend', onZoom)
-  if (riderView) {
-    map.setMaxPitch(EYE_MAX_PITCH)
-  } else {
-    map.on('rotateend', onRotate)
-    map.on('pitchend', onPitch)
-  }
+  if (riderView) map.setMaxPitch(EYE_MAX_PITCH)
   /** The center the camera was moved to last */
   let center: [number, number] | null = null
   /** Whether the camera is being moved by this chase, rather than by hand */
   let moving = false
-  // Zooming by hand zooms around the rider the camera looks at, rather than the pointer. In the
-  // rider's view, only out, which leaves it. Recognized here, since zoom events from the mouse
-  // wheel don't tell that they come from it
-  map.setTransformCameraUpdate(({ zoom }) => {
+  // Any other change of the camera is made by hand, with a gesture or a button: recognized here,
+  // since events from the mouse wheel don't tell that they come from it. Zooming, turning and
+  // tilting set what the camera keeps, around the rider rather than the pointer. The rider's view
+  // holds still, but zooming out leaves it, and zooming in close switches to it
+  map.setTransformCameraUpdate(({ zoom, bearing, pitch: tilt }) => {
+    if (moving || flying || !center) return {}
     const current = map.getZoom()
-    if (moving || flying || zoom === current || !center) return {}
-    if (riderView && zoom > current) return { zoom: current }
-    zoomStart ??= current
+    if (riderView) {
+      if (zoom < current) {
+        zoomStore.set(RIDER_VIEW_ZOOM - ZOOM_BACK)
+        app.setRiderView(false)
+      }
+      return { zoom: current, bearing: map.getBearing(), pitch: map.getPitch(), center: map.getCenter() }
+    }
+    if (zoom > current && zoom >= RIDER_VIEW_ZOOM) {
+      zoomStore.set(RIDER_VIEW_ZOOM - ZOOM_BACK)
+      app.setRiderView(true)
+    } else if (zoom !== current) {
+      zoomStore.set(zoom)
+    }
+    if (bearing !== map.getBearing() && direction !== null) offset = turn(direction, bearing)
+    if (tilt !== map.getPitch()) pitch = tilt
     return { center: new maplibregl.LngLat(...center) }
   })
   /** The camera as applied last, to skip moves to where it already is, as when paused */
@@ -146,7 +129,9 @@ export function chase(map: maplibregl.Map, riders: () => Rider[], riderView: boo
     last = now
     frame = requestAnimationFrame(step)
     const current = riders()
-    if (current.length === 0 || app.time === null || flying || map.isMoving()) return
+    // Following goes on during gestures, which moving the camera doesn't stop, but not during
+    // animations, which it would
+    if (current.length === 0 || app.time === null || flying || map._camera.isMoving()) return
     const rider = current.find(({ track }) => track.osm === followed) ?? current[0]
     const moved = rider.track.osm !== followed
     followed = rider.track.osm
@@ -193,10 +178,7 @@ export function chase(map: maplibregl.Map, riders: () => Rider[], riderView: boo
 
   return () => {
     cancelAnimationFrame(frame)
-    map.off('zoomend', onZoom)
     map.setTransformCameraUpdate(null)
-    map.off('rotateend', onRotate)
-    map.off('pitchend', onPitch)
     if (riderView) map.setMaxPitch(MAX_PITCH.terrain)
     // Back to an ordinary tilted map, with the rider in the middle
     const back: maplibregl.EaseToOptions = { padding: { top: 0, bottom: 0, left: 0, right: 0 }, duration: MOVE }
