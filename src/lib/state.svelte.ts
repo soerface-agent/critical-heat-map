@@ -36,6 +36,8 @@ const SIDEBAR_KEY = 'sidebar'
 const HEAT_KEY = 'heat'
 const FOLLOW_KEY = 'follow'
 const THREE_D_KEY = '3d'
+// Fastest playback in the rider's view, in seconds of riding per second
+const RIDER_VIEW_SPEED = 10
 
 function stored(key: string): string | null {
   try {
@@ -83,6 +85,8 @@ class AppState {
   follow = $state(stored(FOLLOW_KEY) !== 'off')
   /** Terrain, buildings and a tilted map */
   threeD = $state(stored(THREE_D_KEY) === 'on')
+  /** In 3D, follow a rider from their own eyes; not stored, since it starts playback */
+  riderView = $state(false)
   map: Map | null = null
 
   city = $derived(this.cities.find((city) => city.id === this.cityId) ?? null)
@@ -205,6 +209,15 @@ class AppState {
   toggleThreeD() {
     this.threeD = !this.threeD
     store(THREE_D_KEY, this.threeD ? 'on' : 'off')
+    if (!this.threeD) this.riderView = false
+  }
+
+  /** Switches the rider's view on, slowing down and starting playback, or off */
+  toggleRiderView() {
+    this.riderView = !this.riderView
+    if (!this.riderView) return
+    this.speed = Math.min(this.speed, RIDER_VIEW_SPEED)
+    this.play()
   }
 
   showCity(city: City) {

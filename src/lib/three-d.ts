@@ -105,5 +105,5 @@ export function setThreeD(map: maplibregl.Map, on: boolean, dark: boolean, befor
 export function tilt(map: maplibregl.Map, on: boolean) {
   map.setMaxPitch(on ? MAX_PITCH.terrain : MAX_PITCH.flat)
   if (on && map.getPitch() < PITCH / 2) map.easeTo({ pitch: PITCH, duration: TILT })
-  if (!on) map.easeTo({ pitch: 0, bearing: 0, duration: TILT })
+  if (!on) map.easeTo({ pitch: 0, bearing: 0, padding: { top: 0, bottom: 0, left: 0, right: 0 }, duration: TILT })
 }

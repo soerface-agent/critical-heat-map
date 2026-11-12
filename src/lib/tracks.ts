@@ -21,6 +21,8 @@ const HIT_RADIUS = 4
 const LIVE = { light: '#1f4fbf', dark: '#7ea6f4' }
 // Opacity rides that just finished start fading from
 const AFTERGLOW_OPACITY = 0.7
+// Opacity of the way still ahead of a rider, if shown
+const AHEAD_OPACITY = 0.35
 // Outline that keeps the ride being played apart from the heat map lines it crosses
 const CASING = { light: '#ffffff', dark: '#111111' }
 
@@ -30,6 +32,8 @@ export interface TrackStyle {
   heat: boolean
   /** Whether a moment is being played back, rather than all rides shown */
   playing: boolean
+  /** Show the rest of the rides being played, faintly, as the way ahead */
+  ahead: boolean
 }
 
 // The track whose hover feature-state is set
@@ -199,15 +203,15 @@ export function highlightTrack(map: maplibregl.Map, id: number | null) {
 /**
  * Draws the rides being played as far as they got at `time`, glowing in their type colors, with a
  * dot where the riders are. On the heat map they are blue with an outline instead. Rides that just
- * finished stay in their color for a while, fading by their `fade` (0–1). Returns where the riders
- * are, in the order of `riding`.
+ * finished stay in their color for a while, fading by their `fade` (0–1). With `ahead`, the rest of
+ * each ride shows faintly. Returns where the riders are, in the order of `riding`.
  */
 export function drawPlayback(
   map: maplibregl.Map,
   riding: Track[],
   afterglow: { track: Track; fade: number }[],
   time: number | null,
-  { dark, heat }: TrackStyle,
+  { dark, heat, ahead }: TrackStyle,
 ): { track: Track; position: Position }[] {
   const features: Feature[] = []
   const heads: { track: Track; position: Position }[] = []
@@ -234,6 +238,10 @@ export function drawPlayback(
     // Without the glow and dimmer, so they don't compete with the rides being played
     for (const { track, fade } of afterglow) drawRide(track, Infinity, AFTERGLOW_OPACITY * (1 - fade), false)
     for (const track of riding) {
+      if (ahead) {
+        const color = heat ? LIVE[theme] : eventType(track.type)[dark ? 'dark' : 'color']
+        draw(linesBetween(track.coordinates, (time - track.from) / 1000, Infinity), { color, width: 3, opacity: AHEAD_OPACITY })
+      }
       const { color, head } = drawRide(track, (time - track.from) / 1000, 1, true)
       if (head) {
         heads.push({ track, position: head })

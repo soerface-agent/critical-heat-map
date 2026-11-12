@@ -3,9 +3,9 @@
   import { untrack } from 'svelte'
   import 'maplibre-gl/dist/maplibre-gl.css'
   import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url'
-  import type { Position } from 'geojson'
   import { app, type Track } from './state.svelte'
   import { theme } from './theme.svelte'
+  import { chase, type Rider } from './chase'
   import { MAX_PITCH, setThreeD, tilt } from './three-d'
   import { FIRST_TRACK_LAYER, addTrackLayers, bindTrackEvents, drawPlayback, highlightTrack, showTracks, styleTracks, type TrackStyle } from './tracks'
 
@@ -46,6 +46,9 @@
     threeD = this.button('3D', 'Show terrain and buildings in 3D', ICON(
       '<path d="M10 2.5l6.5 3.75v7.5L10 17.5l-6.5-3.75v-7.5z" stroke-linejoin="round"/><path d="M3.5 6.25L10 10l6.5-3.75M10 10v7.5" stroke-linejoin="round"/>',
     ), () => app.toggleThreeD())
+    riderView = this.button("Rider's view", "Ride along at eye level, in 3D", ICON(
+      '<circle cx="5" cy="13.5" r="3.2"/><circle cx="15" cy="13.5" r="3.2"/><path d="M5 13.5l3-6h5l2 6M8 7.5l2.5 6h2.5M12 5h2.5" stroke-linecap="round" stroke-linejoin="round"/>',
+    ), () => app.toggleRiderView())
 
     button(label: string, title: string, icon: string, onclick: () => void) {
       const button = document.createElement('button')
@@ -60,7 +63,7 @@
     onAdd() {
       const group = document.createElement('div')
       group.className = 'maplibregl-ctrl maplibregl-ctrl-group toggle-control'
-      group.append(this.heat, this.follow, this.threeD)
+      group.append(this.heat, this.follow, this.threeD, this.riderView)
       return group
     }
 
@@ -76,6 +79,8 @@
     toggleControl.heat.ariaPressed = String(app.heat)
     toggleControl.follow.ariaPressed = String(app.follow)
     toggleControl.threeD.ariaPressed = String(app.threeD)
+    toggleControl.riderView.ariaPressed = String(app.riderView)
+    toggleControl.riderView.hidden = !app.threeD
   })
   let map = $state.raw<maplibregl.Map | null>(null)
   /** Increases whenever a map style finished loading, which removes the track layers */
@@ -186,14 +191,14 @@
 
   // Only changes when playback starts or stops, not with every frame
   let playing = $derived(app.time !== null)
-  let style: TrackStyle = $derived({ dark: theme.dark, heat: app.heat, playing })
+  let style: TrackStyle = $derived({ dark: theme.dark, heat: app.heat, playing, ahead: app.threeD && app.riderView })
 
   $effect(() => {
     if (map && layers) styleTracks(map, style)
   })
 
   // Where the riders are, as drawn last, for following them
-  let riders: { track: Track; position: Position }[] = []
+  let riders: Rider[] = []
   /** The zoom level following aims for while the riders are slow enough, null until it follows */
   let followZoom: number | null = null
 
@@ -201,10 +206,16 @@
     if (map && layers) riders = drawPlayback(map, app.riding, app.afterglow, app.time, style)
   })
 
+  // In 3D, follow one rider from behind, or from their eyes
+  $effect(() => {
+    if (!map || !app.threeD || !(app.follow || app.riderView) || !app.playing) return
+    return chase(map, () => riders, app.riderView)
+  })
+
   // Follow the riders on every frame, independent of the effects above, so moving the map can't
   // feed back into what is drawn
   $effect(() => {
-    if (!map || !app.follow || !app.playing) return
+    if (!map || app.threeD || !app.follow || !app.playing) return
     const instance = map
     followZoom ??= instance.getZoom()
     let last = performance.now()
@@ -291,6 +302,10 @@
     align-items: center;
     justify-content: center;
     color: var(--text);
+  }
+
+  .map :global(.toggle-control button[hidden]) {
+    display: none;
   }
 
   .map :global(.toggle-control button[aria-pressed='true']) {

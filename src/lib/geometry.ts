@@ -22,6 +22,55 @@ export function linesBetween(lines: Position[][], from: number, to: number): Pos
   return result
 }
 
+/** Where a track is `time` seconds after its start, held at its first and last point outside of it */
+export function positionAt(lines: Position[][], time: number): Position {
+  let last = lines[0][0]
+  for (const line of lines) {
+    for (let i = 0; i < line.length; i++) {
+      const point = line[i]
+      if (point[2] >= time) return i > 0 && line[i - 1][2] < time ? at(line[i - 1], point, time) : point
+      last = point
+    }
+  }
+  return last
+}
+
+/** Distance in m between two [lon, lat], accurate enough within a city */
+function meters([x1, y1]: Position, [x2, y2]: Position): number {
+  return Math.hypot((x2 - x1) * Math.cos((y1 * Math.PI) / 180), y2 - y1) * 111_320
+}
+
+/**
+ * The point `distance` m along a track from where it is `time` seconds after its start, backwards
+ * if negative, held at its first and last point
+ */
+export function pointFrom(lines: Position[][], time: number, distance: number): Position {
+  const points = lines.flat()
+  const step = Math.sign(distance)
+  // The first point after the position, going forwards, or the last one before it, going backwards
+  let i = points.findIndex((point) => point[2] >= time)
+  if (i === -1) i = points.length
+  if (step < 0) i--
+  let from = positionAt(lines, time)
+  let left = Math.abs(distance)
+  for (; i >= 0 && i < points.length; i += step) {
+    const length = meters(from, points[i])
+    if (length >= left) {
+      const f = left / length
+      return [from[0] + (points[i][0] - from[0]) * f, from[1] + (points[i][1] - from[1]) * f]
+    }
+    left -= length
+    from = points[i]
+  }
+  return from
+}
+
+/** Compass bearing in degrees from one [lon, lat] to another, accurate enough within a city */
+export function bearing([x1, y1]: Position, [x2, y2]: Position): number {
+  const kx = Math.cos((y1 * Math.PI) / 180)
+  return (Math.atan2((x2 - x1) * kx, y2 - y1) * 180) / Math.PI
+}
+
 /** Points along a line of [lon, lat] about every `step` km, including its first point */
 export function pointsAlong(line: Position[], step: number): Position[] {
   const points: Position[] = []
