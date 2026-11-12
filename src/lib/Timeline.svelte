@@ -18,6 +18,16 @@
   const COLUMN = 2
   const FLOOR = 3
   const HEADROOM = 4
+  // Seconds of playback the buttons next to play skip, and milliseconds they are held before they
+  // play backwards or faster forwards instead
+  const SKIP = 5
+  const HOLD_DELAY = 300
+  // Part of a ride's time the timeline shows before and after it when zooming in on it, and the
+  // milliseconds the zoom takes
+  const RIDE_MARGIN = 0.04
+  const ZOOM_TIME = 500
+  // Size of the overview of all rides shown while zoomed in
+  const OVERVIEW = { width: 160, narrowWidth: 96, height: 22 }
   const MINUTE = 60_000
   const HOUR = 60 * MINUTE
   const DAY = 24 * HOUR
@@ -155,11 +165,53 @@
 
   const ridden = (track: Track) => Math.min(1, ((app.time ?? track.to) - track.from) / (track.to - track.from))
 
+  /** Moves the timeline smoothly to a time span, zooming at an even pace */
+  let animation = 0
+  function animateTo(target: TimeSpan) {
+    const start = app.domain
+    const [from, to] = [start.to - start.from, target.to - target.from]
+    const begin = performance.now()
+    const id = ++animation
+    const frame = (now: number) => {
+      if (id !== animation) return
+      const done = Math.min(1, (now - begin) / ZOOM_TIME)
+      const eased = 1 - (1 - done) ** 3
+      const length = from * (to / from) ** eased
+      const middle = (start.from + start.to) / 2 + ((target.from + target.to) / 2 - (start.from + start.to) / 2) * eased
+      app.zoomTo({ from: middle - length / 2, to: middle + length / 2 })
+      if (done < 1) requestAnimationFrame(frame)
+    }
+    requestAnimationFrame(frame)
+  }
+  const stopAnimation = () => animation++
+
+  /** The rides being played: the session the playback is in */
+  let session = $derived(app.time === null ? null : (app.sessions.find((session) => session.from <= app.time! && app.time! < session.to) ?? null))
+
+  // Zoom in on each ride the playback comes to, so the timeline shows its profile in detail. Not
+  // while dragging the playhead, which would move the timeline under it
+  $effect(() => {
+    const current = session
+    if (!current || scrub) return
+    untrack(() => {
+      if (app.viewBeforeRides === undefined) app.viewBeforeRides = app.view
+      const margin = (current.to - current.from) * RIDE_MARGIN
+      animateTo({ from: current.from - margin, to: current.to + margin })
+    })
+  })
+
+  $effect(() => {
+    if (app.time !== null || app.viewBeforeRides === undefined) return
+    stopAnimation()
+    app.view = app.viewBeforeRides
+    app.viewBeforeRides = undefined
+  })
+
   // Keep the playhead in view while playing or skipping, by turning the page when it leaves the
-  // zoomed-in part
+  // zoomed-in part, unless zooming in on a ride already brings it into view
   $effect(() => {
     const time = app.time
-    if (time === null) return
+    if (time === null || (session && !scrub)) return
     const { from, to } = untrack(() => app.domain)
     if (time < from || time > to) app.zoomTo({ from: time - (to - from) * 0.05, to: time + (to - from) * 0.95 })
   })
@@ -169,6 +221,7 @@
   $effect(() => {
     function wheel(event: WheelEvent) {
       event.preventDefault()
+      stopAnimation()
       const rect = bars.getBoundingClientRect()
       const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? rect.width : 1
       const sideways = event.shiftKey ? event.deltaX || event.deltaY : event.deltaX
@@ -220,6 +273,7 @@
       return
     }
     if (pointers.size > 1) return
+    stopAnimation()
     const onBar = (event.target as Element).closest('.bar') !== null
     moved = false
     press = { x: event.clientX, rect, domain, onBar, mode: 'click', shift: event.shiftKey }
@@ -310,6 +364,73 @@
     scrub = null
   }
 
+  // Holding a skip button plays backwards or faster forwards, until it is let go
+  let scanning: (() => void) | null = null
+  let holdTimer: ReturnType<typeof setTimeout> | undefined
+  /** Whether the last press was held, so the click that follows it is no skip */
+  let held = false
+
+  function skipPress(event: PointerEvent, direction: 1 | -1) {
+    if (event.button !== 0) return
+    held = false
+    holdTimer = setTimeout(() => {
+      held = true
+      scanning = app.scan(direction)
+    }, HOLD_DELAY)
+  }
+
+  function skipRelease() {
+    clearTimeout(holdTimer)
+    scanning?.()
+    scanning = null
+  }
+
+  function skipClick(direction: 1 | -1) {
+    if (held) held = false
+    else app.skipBy(direction * SKIP)
+  }
+
+  // Space plays and pauses, unless something else has the focus. The arrow keys skip, also with a
+  // button focused, but not with a field, a slider or the map, which use them themselves
+  $effect(() => {
+    function key(event: KeyboardEvent) {
+      if (event.altKey || event.ctrlKey || event.metaKey) return
+      const target = event.target as HTMLElement
+      const ownArrows = target.closest('input, select, textarea, [role="slider"], .maplibregl-canvas-container') !== null
+      if (event.key === ' ' && target === document.body) {
+        if (app.playing) app.pause()
+        else app.play()
+      } else if ((event.key === 'ArrowLeft' || event.key === 'ArrowRight') && !ownArrows) {
+        app.skipBy((event.key === 'ArrowLeft' ? -1 : 1) * SKIP)
+      } else return
+      event.preventDefault()
+    }
+    window.addEventListener('keydown', key)
+    return () => window.removeEventListener('keydown', key)
+  })
+
+  const narrowQuery = matchMedia('(max-width: 720px)')
+  let narrow = $state(narrowQuery.matches)
+  $effect(() => {
+    const change = () => (narrow = narrowQuery.matches)
+    narrowQuery.addEventListener('change', change)
+    return () => narrowQuery.removeEventListener('change', change)
+  })
+
+  /** The overview of all rides shown while zoomed in: where they are and the part in view */
+  let overview = $derived.by(() => {
+    const overviewWidth = narrow ? OVERVIEW.narrowWidth : OVERVIEW.width
+    const { from, to } = app.extent
+    const x = (time: number) => ((time - from) / (to - from)) * overviewWidth
+    const left = x(app.domain.from)
+    return {
+      width: overviewWidth,
+      rides: app.listed.map((track) => ({ osm: track.osm, x: x(track.from), color: eventColor(track.type), shown: !app.hidden.has(track.osm) })),
+      view: { x: left, width: Math.max(2, x(app.domain.to) - left) },
+      playhead: app.time === null ? null : x(app.time),
+    }
+  })
+
   function scrubKey(event: KeyboardEvent) {
     const steps: Record<string, number> = { ArrowLeft: -0.01, ArrowRight: 0.01, PageDown: -0.1, PageUp: 0.1 }
     if (event.key in steps) app.seek(playhead + steps[event.key] * span)
@@ -337,6 +458,22 @@
     </button>
     <button
       type="button"
+      class="skip"
+      aria-label="Back {SKIP} seconds"
+      title="Back {SKIP} seconds of playback (←), hold to play backwards"
+      disabled={app.time === null}
+      onpointerdown={(event) => skipPress(event, -1)}
+      onpointerup={skipRelease}
+      onpointerleave={skipRelease}
+      onpointercancel={skipRelease}
+      onclick={() => skipClick(-1)}
+    >
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M8 3.5v9L1.5 8zM15 3.5v9L8.5 8z" fill="currentColor" />
+      </svg>
+    </button>
+    <button
+      type="button"
       class="play"
       aria-label={app.playing ? 'Pause' : 'Play selected rides'}
       onclick={() => (app.playing ? app.pause() : app.play())}
@@ -348,6 +485,22 @@
         {:else}
           <path d="M6 3.5v13l11-6.5z" fill="currentColor" />
         {/if}
+      </svg>
+    </button>
+    <button
+      type="button"
+      class="skip"
+      aria-label="Ahead {SKIP} seconds"
+      title="Ahead {SKIP} seconds of playback (→), hold to play faster"
+      disabled={app.time === null}
+      onpointerdown={(event) => skipPress(event, 1)}
+      onpointerup={skipRelease}
+      onpointerleave={skipRelease}
+      onpointercancel={skipRelease}
+      onclick={() => skipClick(1)}
+    >
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M1 3.5v9L7.5 8zM8 3.5v9L14.5 8z" fill="currentColor" />
       </svg>
     </button>
     <button
@@ -397,7 +550,32 @@
         <span class="hint">Drag the timeline to move it, scroll or pinch to zoom, Shift-drag to zoom in on a span. Click a ride or drag the playhead to jump in time.</span>
       {/if}
       {#if app.domain !== app.extent}
-        <button type="button" class="show-all" onclick={() => (app.view = null)}>Reset zoom</button>
+        <button
+          type="button"
+          class="show-all"
+          aria-label="Show all rides"
+          title="Zoomed in: the part shown of all rides. Click to show all"
+          onclick={() => animateTo(app.extent)}
+        >
+          <svg width={overview.width} height={OVERVIEW.height} aria-hidden="true">
+            <line class="baseline" x1="0" x2={overview.width} y1={OVERVIEW.height - 3} y2={OVERVIEW.height - 3} />
+            {#each overview.rides as ride (ride.osm)}
+              <line
+                class="ride-tick"
+                class:shown={ride.shown}
+                x1={ride.x}
+                x2={ride.x}
+                y1="6"
+                y2={OVERVIEW.height - 3}
+                stroke={ride.color}
+              />
+            {/each}
+            <rect class="window" x={overview.view.x} y="2" width={overview.view.width} height={OVERVIEW.height - 4} rx="2" />
+            {#if overview.playhead !== null}
+              <line class="overview-playhead" x1={overview.playhead} x2={overview.playhead} y1="0" y2={OVERVIEW.height} />
+            {/if}
+          </svg>
+        </button>
       {/if}
     </div>
 
@@ -611,6 +789,37 @@
 
   .status .show-all {
     margin-left: auto;
+    height: auto;
+    padding: 2px 4px;
+  }
+
+  .show-all svg {
+    display: block;
+    overflow: visible;
+  }
+
+  .show-all .baseline {
+    stroke: var(--axis);
+  }
+
+  .show-all .ride-tick {
+    stroke-width: 1.5;
+    opacity: 0.35;
+  }
+
+  .show-all .ride-tick.shown {
+    opacity: 0.9;
+  }
+
+  .show-all .window {
+    fill: var(--accent-soft);
+    stroke: var(--accent);
+    stroke-width: 1.5;
+  }
+
+  .show-all .overview-playhead {
+    stroke: var(--text);
+    stroke-width: 1.5;
   }
 
   .plot {
@@ -799,7 +1008,7 @@
         'clock totals reset' 20px
         'now now reset' 20px
         / auto minmax(0, 1fr) auto;
-      column-gap: 8px;
+      gap: 0 8px;
       height: 40px;
     }
 

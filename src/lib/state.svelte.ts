@@ -38,6 +38,8 @@ const FOLLOW_KEY = 'follow'
 const THREE_D_KEY = '3d'
 // Fastest playback in the rider's view, in seconds of riding per second
 const RIDER_VIEW_SPEED = 10
+// Times the playback speed at which holding a skip button plays forwards or backwards
+const SCAN_FACTOR = 2
 
 function stored(key: string): string | null {
   try {
@@ -110,6 +112,11 @@ class AppState {
   })
   /** The part of the timeline zoomed in to, or null for all of it */
   view = $state.raw<TimeSpan | null>(null)
+  /**
+   * The zoomed-in part before the timeline zoomed in on the rides played, which it shows again when
+   * playback stops; undefined while it didn't
+   */
+  viewBeforeRides: TimeSpan | null | undefined = undefined
   /** The zoomed-in part, unless it lies outside the tracks on the timeline, e.g. after changing city */
   domain: TimeSpan = $derived(
     this.view && this.view.to > this.extent.from && this.view.from < this.extent.to ? this.view : this.extent,
@@ -119,6 +126,8 @@ class AppState {
   time = $state<number | null>(null)
   playing = $state(false)
   speed = $state(1200)
+  /** Whether the map follows the riders: while a moment is shown, always in the rider's view */
+  following = $derived(this.time !== null && (this.follow || (this.threeD && this.riderView)))
   /** Tracks underway at the playback time, drawn as far as they got */
   riding = $derived(this.time === null ? [] : this.drawn.filter((track) => track.from <= this.time! && this.time! < track.to))
   /** Tracks drawn in full: all of them, or while playing back, the ones finished */
@@ -212,12 +221,12 @@ class AppState {
     if (!this.threeD) this.riderView = false
   }
 
-  /** Switches the rider's view on, slowing down and starting playback, or off */
-  toggleRiderView() {
-    this.riderView = !this.riderView
-    if (!this.riderView) return
+  /** Switches the rider's view on, slowing down and starting playback if it isn't, or off */
+  setRiderView(on: boolean) {
+    this.riderView = on
+    if (!on) return
     this.speed = Math.min(this.speed, RIDER_VIEW_SPEED)
-    this.play()
+    if (this.time === null) this.play()
   }
 
   showCity(city: City) {
@@ -240,9 +249,11 @@ class AppState {
   play() {
     if (this.playing || this.sessions.length === 0) return
     let time = this.time
-    // Start over at the beginning of the timeline section in view
-    if (time === null || time >= this.sessions.at(-1)!.to || time < this.domain.from || time > this.domain.to) {
-      time = this.domain.from
+    // Start over at the beginning of the timeline section in view, as it was before zooming in on
+    // the rides played
+    const section = this.viewBeforeRides === undefined ? this.domain : (this.viewBeforeRides ?? this.extent)
+    if (time === null || time >= this.sessions.at(-1)!.to || time < section.from || time > section.to) {
+      time = section.from
     }
     // Between rides, go straight to the next one
     if (!this.sessions.some((session) => session.from <= time! && time! < session.to)) {
@@ -290,6 +301,52 @@ class AppState {
   skipForward() {
     const next = this.time === null ? undefined : this.sessions.find((session) => session.from > this.time!)
     if (next) this.seek(next.from)
+  }
+
+  /**
+   * The time `ms` of riding later than `time`, or earlier if negative, counting only the rides:
+   * the pauses between them are skipped like in playback. Held at the first and last ride
+   */
+  #through(time: number, ms: number): number {
+    let left = Math.abs(ms)
+    const sessions = ms < 0 ? this.sessions.toReversed() : this.sessions
+    for (const { from, to } of sessions) {
+      if (ms < 0 ? from >= time : to <= time) continue
+      // The part of the ride on this side of `time`
+      const [start, end] = ms < 0 ? [Math.min(to, time), from] : [Math.max(from, time), to]
+      if (Math.abs(end - start) >= left) return start + Math.sign(ms) * left
+      left -= Math.abs(end - start)
+      time = end
+    }
+    return time
+  }
+
+  /** Moves the playback by `seconds` of playback at its speed, backwards if negative */
+  skipBy(seconds: number) {
+    if (this.time !== null) this.time = this.#through(this.time, seconds * 1000 * this.speed)
+  }
+
+  /**
+   * Plays faster forwards, or backwards, until the returned function is called. Then goes on
+   * playing if it was before
+   */
+  scan(direction: 1 | -1): () => void {
+    const resume = this.playing
+    this.pause()
+    const generation = this.#generation
+    let last = performance.now()
+    const frame = (now: number) => {
+      if (generation !== this.#generation || this.time === null) return
+      this.time = this.#through(this.time, direction * Math.max(0, now - last) * this.speed * SCAN_FACTOR)
+      last = now
+      requestAnimationFrame(frame)
+    }
+    requestAnimationFrame(frame)
+    return () => {
+      if (generation !== this.#generation) return
+      this.#generation++
+      if (resume) this.play()
+    }
   }
 
   pause() {

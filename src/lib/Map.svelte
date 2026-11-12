@@ -46,9 +46,9 @@
     threeD = this.button('3D', 'Show terrain and buildings in 3D', ICON(
       '<path d="M10 2.5l6.5 3.75v7.5L10 17.5l-6.5-3.75v-7.5z" stroke-linejoin="round"/><path d="M3.5 6.25L10 10l6.5-3.75M10 10v7.5" stroke-linejoin="round"/>',
     ), () => app.toggleThreeD())
-    riderView = this.button("Rider's view", "Ride along at eye level, in 3D", ICON(
+    riderView = this.button("Rider's view", 'Ride along just behind the rider, in 3D. Zooming in or out also switches it', ICON(
       '<circle cx="5" cy="13.5" r="3.2"/><circle cx="15" cy="13.5" r="3.2"/><path d="M5 13.5l3-6h5l2 6M8 7.5l2.5 6h2.5M12 5h2.5" stroke-linecap="round" stroke-linejoin="round"/>',
-    ), () => app.toggleRiderView())
+    ), () => app.setRiderView(!app.riderView))
 
     button(label: string, title: string, icon: string, onclick: () => void) {
       const button = document.createElement('button')
@@ -77,7 +77,10 @@
 
   $effect(() => {
     toggleControl.heat.ariaPressed = String(app.heat)
-    toggleControl.follow.ariaPressed = String(app.follow)
+    // The rider's view always follows
+    const riderView = app.threeD && app.riderView
+    toggleControl.follow.ariaPressed = String(app.follow || riderView)
+    toggleControl.follow.disabled = riderView
     toggleControl.threeD.ariaPressed = String(app.threeD)
     toggleControl.riderView.ariaPressed = String(app.riderView)
     toggleControl.riderView.hidden = !app.threeD
@@ -114,17 +117,20 @@
       if (city) app.cityId = city.id
       byHand = false
     })
-    // The zoom level chosen by hand is the closest following zooms in to
+    // The zoom level chosen by hand is the closest following zooms in to. While following, the
+    // zoom level is kept instead, see handZoom
     let zoomingByHand = false
     instance.on('zoomstart', (event) => (zoomingByHand = event.originalEvent !== undefined))
     instance.on('zoomend', () => {
-      if (zoomingByHand) followZoom = instance.getZoom()
+      if (zoomingByHand && !app.following) followZoom = instance.getZoom()
       zoomingByHand = false
     })
-    // Panning the map by hand while playing means looking elsewhere, so stop following until asked
-    // again. Not stored, unlike the button: next time, following is on again
+    // Panning the map by hand while following means looking elsewhere, so stop following until
+    // asked again. Not stored, unlike the button: next time, following is on again
     instance.on('dragstart', () => {
-      if (app.playing) app.follow = false
+      if (app.time === null) return
+      app.follow = false
+      app.riderView = false
     })
     bindTrackEvents(instance)
     map = instance
@@ -201,6 +207,10 @@
   let riders: Rider[] = []
   /** The zoom level following aims for while the riders are slow enough, null until it follows */
   let followZoom: number | null = null
+  /** The zoom level chosen by hand while following, kept until the playback stops */
+  let handZoom: number | null = null
+  /** The same for the camera chasing a rider in 3D, which has a range of its own */
+  let chaseZoom: number | null = null
 
   $effect(() => {
     if (map && layers) riders = drawPlayback(map, app.riding, app.afterglow, app.time, style)
@@ -208,14 +218,17 @@
 
   // In 3D, follow one rider from behind, or from their eyes
   $effect(() => {
-    if (!map || !app.threeD || !(app.follow || app.riderView) || !app.playing) return
-    return chase(map, () => riders, app.riderView)
+    if (!map || !app.threeD || !app.following) return
+    return chase(map, () => riders, app.riderView, {
+      get: () => chaseZoom,
+      set: (zoom) => (chaseZoom = zoom),
+    })
   })
 
   // Follow the riders on every frame, independent of the effects above, so moving the map can't
-  // feed back into what is drawn
+  // feed back into what is drawn. Also while paused, so they stay in view when seeking
   $effect(() => {
-    if (!map || app.threeD || !app.follow || !app.playing) return
+    if (!map || app.threeD || !app.following) return
     const instance = map
     followZoom ??= instance.getZoom()
     let last = performance.now()
@@ -235,8 +248,24 @@
       const speed = metersPerSecond * corner.meterInMercatorCoordinateUnits() * app.speed
       const byspeed = Math.log2(RIDE_SCREEN_SPEED / (speed * WORLD_SIZE))
       const end = maplibregl.MercatorCoordinate.fromLngLat([east, south])
-      return { key, west: corner.x, north: corner.y, east: end.x, south: end.y, zoom: Math.min(followZoom!, Math.max(fit, byspeed)) }
+      const zoom = handZoom ?? Math.min(followZoom!, Math.max(fit, byspeed))
+      return { key, west: corner.x, north: corner.y, east: end.x, south: end.y, zoom }
     }
+
+    // Zooming by hand keeps the riders where they are on screen, rather than what is under the
+    // pointer, so they stay in view, and the zoom level is kept. Recognized here, since zoom events
+    // from the mouse wheel don't tell that they come from it; following itself only zooms flying
+    instance.setTransformCameraUpdate(({ zoom }) => {
+      const current = instance.getZoom()
+      if (flying || zoom === current || riders.length === 0) return {}
+      handZoom = zoom
+      const dots = riders.map(({ position }) => maplibregl.MercatorCoordinate.fromLngLat(position as [number, number]))
+      const x = (Math.min(...dots.map(({ x }) => x)) + Math.max(...dots.map(({ x }) => x))) / 2
+      const y = (Math.min(...dots.map(({ y }) => y)) + Math.max(...dots.map(({ y }) => y))) / 2
+      const center = maplibregl.MercatorCoordinate.fromLngLat(instance.getCenter())
+      const factor = 2 ** (current - zoom)
+      return { center: new maplibregl.MercatorCoordinate(x + (center.x - x) * factor, y + (center.y - y) * factor).toLngLat() }
+    })
 
     /** Keeps a center coordinate so the map stays within the ride, or in its middle if it fits */
     const within = (value: number, low: number, high: number, half: number, pad: number) =>
@@ -250,7 +279,8 @@
       if (riders.length === 0 || flying || instance.isMoving() || seconds === 0) return
 
       const tracks = riders.map(({ track }) => track)
-      const key = `${tracks.map((track) => track.osm).join(',')}|${app.speed}|${followZoom}`
+      // Not with the zoom level chosen by hand, which needs no move
+      const key = `${tracks.map((track) => track.osm).join(',')}|${app.speed}|${handZoom === null ? followZoom : 'hand'}`
       const moved = plan?.key !== key
       if (moved) plan = planFor(tracks, key)
 
@@ -285,12 +315,18 @@
       })
     }
     let frame = requestAnimationFrame(step)
-    return () => cancelAnimationFrame(frame)
+    return () => {
+      cancelAnimationFrame(frame)
+      instance.setTransformCameraUpdate(null)
+    }
   })
 
   // After playback, following starts again from the zoom level the map then has
   $effect(() => {
-    if (app.time === null) followZoom = null
+    if (app.time !== null) return
+    followZoom = null
+    handZoom = null
+    chaseZoom = null
   })
 </script>
 
