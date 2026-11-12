@@ -197,7 +197,8 @@ export function highlightTrack(map: maplibregl.Map, id: number | null) {
 /**
  * Draws the rides being played as far as they got at `time`, glowing in their type colors, with a
  * dot where the riders are. On the heat map they are blue with an outline instead. Rides that just
- * finished stay in their color for a while, fading by their `fade` (0–1).
+ * finished stay in their color for a while, fading by their `fade` (0–1). Returns where the riders
+ * are, in the order of `riding`.
  */
 export function drawPlayback(
   map: maplibregl.Map,
@@ -205,8 +206,9 @@ export function drawPlayback(
   afterglow: { track: Track; fade: number }[],
   time: number | null,
   { dark, heat }: TrackStyle,
-) {
+): { track: Track; position: Position }[] {
   const features: Feature[] = []
+  const heads: { track: Track; position: Position }[] = []
   const theme = dark ? 'dark' : 'light'
   const draw = (lines: Position[][], properties: { color: string; width: number; opacity: number; blur?: number }) => {
     if (lines.length === 0) return
@@ -232,11 +234,13 @@ export function drawPlayback(
     for (const track of riding) {
       const { color, head } = drawRide(track, (time - track.from) / 1000, 1, true)
       if (head) {
+        heads.push({ track, position: head })
         features.push({ type: 'Feature', properties: { color, stroke: CASING[theme] }, geometry: { type: 'Point', coordinates: head } })
       }
     }
   }
   ;(map.getSource(PLAYBACK) as maplibregl.GeoJSONSource).setData({ type: 'FeatureCollection', features })
+  return heads
 }
 
 function popupContent(tracks: Track[]): HTMLElement {

@@ -34,6 +34,7 @@ const AFTERGLOW = 3
 const MIN_SPAN = 10 * 60_000
 const SIDEBAR_KEY = 'sidebar'
 const HEAT_KEY = 'heat'
+const FOLLOW_KEY = 'follow'
 
 function stored(key: string): string | null {
   try {
@@ -71,40 +72,41 @@ class AppState {
 
   /** OSM ids of the tracks the user unchecked */
   hidden = new SvelteSet<number>()
-  /** The visible part of the map */
-  bounds = $state.raw<BBox | null>(null)
+  /** Id of the city whose rides are listed, on the timeline and played */
+  cityId = $state<string | null>(null)
   hovered = $state<number | null>(null)
   sidebarOpen = $state(stored(SIDEBAR_KEY) !== 'closed')
   /** Show the finished rides as a heat map instead of lines in their type colors */
   heat = $state(stored(HEAT_KEY) === 'on')
+  /** Keep the rides being played in the middle of the map */
+  follow = $state(stored(FOLLOW_KEY) !== 'off')
   map: Map | null = null
 
-  /** Tracks in the map view: the ones the sidebar lists */
-  listed = $derived(this.tracks.filter((track) => this.inView(track)))
+  city = $derived(this.cities.find((city) => city.id === this.cityId) ?? null)
+  /**
+   * Tracks of the city: the ones the sidebar lists and the timeline shows. Only the city and the
+   * checkboxes decide what is listed, selected and played, never where the map is, so moving the map
+   * (by hand or following the riders) can't change what is played next
+   */
+  listed = $derived(this.city ? this.tracks.filter((track) => track.city === this.city!.id) : this.tracks)
   selected = $derived(this.listed.filter((track) => !this.hidden.has(track.osm)))
-  /** Tracks drawn on the map while not playing; ones outside the view are clipped by the map anyway */
+  /** Tracks drawn on the map while not playing, of all cities */
   drawn = $derived(this.tracks.filter((track) => !this.hidden.has(track.osm)))
 
-  /** The city at the center of the map view, if any */
-  city = $derived.by(() => {
-    if (!this.bounds) return null
-    const [west, south, east, north] = this.bounds
-    const x = (west + east) / 2
-    const y = (south + north) / 2
-    return this.cities.find(({ bbox }) => intersects(bbox, [x, y, x, y])) ?? null
-  })
-
-  /** All tracks, with a month of space on both sides */
+  /** All listed tracks, with a month of space on both sides */
   extent: TimeSpan = $derived.by(() => {
-    if (this.tracks.length === 0) return { from: 0, to: 1 }
+    if (this.listed.length === 0) return { from: 0, to: 1 }
     return {
-      from: Math.min(...this.tracks.map((track) => track.from)) - 31 * DAY,
-      to: Math.max(...this.tracks.map((track) => track.to)) + 31 * DAY,
+      from: Math.min(...this.listed.map((track) => track.from)) - 31 * DAY,
+      to: Math.max(...this.listed.map((track) => track.to)) + 31 * DAY,
     }
   })
   /** The part of the timeline zoomed in to, or null for all of it */
   view = $state.raw<TimeSpan | null>(null)
-  domain: TimeSpan = $derived(this.view ?? this.extent)
+  /** The zoomed-in part, unless it lies outside the tracks on the timeline, e.g. after changing city */
+  domain: TimeSpan = $derived(
+    this.view && this.view.to > this.extent.from && this.view.from < this.extent.to ? this.view : this.extent,
+  )
 
   // Playback: the moment shown on the map, or null to show all tracks
   time = $state<number | null>(null)
@@ -164,8 +166,9 @@ class AppState {
   })
   #generation = 0
 
-  inView(track: Track): boolean {
-    return !this.bounds || intersects(track.bbox, this.bounds)
+  /** The city whose area contains a point, if any */
+  cityAt([lon, lat]: [number, number]): City | null {
+    return this.cities.find(({ bbox }) => intersects(bbox, [lon, lat, lon, lat])) ?? null
   }
 
   async load(url: string) {
@@ -191,7 +194,13 @@ class AppState {
     store(HEAT_KEY, this.heat ? 'on' : 'off')
   }
 
+  toggleFollow() {
+    this.follow = !this.follow
+    store(FOLLOW_KEY, this.follow ? 'on' : 'off')
+  }
+
   showCity(city: City) {
+    this.cityId = city.id
     this.map?.fitBounds(city.bbox, { padding: 40, duration: 800 })
   }
 

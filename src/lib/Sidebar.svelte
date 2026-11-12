@@ -27,9 +27,9 @@
   })
 </script>
 
-<aside id="sidebar" aria-label="Rides in this map view">
+<aside id="sidebar" aria-label="Rides in {app.city?.name ?? 'all cities'}">
   <header>
-    <div class="label">In this map view</div>
+    <div class="label">In {app.city?.name ?? 'all cities'}</div>
     <div class="total">{km(app.totals.km, 0)} km</div>
     <div class="meta">
       {#if app.time !== null}
@@ -63,7 +63,7 @@
 
   <div class="list">
     {#if app.collection && app.listed.length === 0}
-      <p class="empty">No rides in this part of the map. Pick a city or zoom out.</p>
+      <p class="empty">No rides here yet.</p>
     {/if}
     {#each years as group (group.year)}
       <label class="year">

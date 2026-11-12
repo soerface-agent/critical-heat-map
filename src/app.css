@@ -10,7 +10,6 @@
   --border-strong: #d5d2cb;
   --hover: #f1efea;
   --axis: #bdb9b0;
-  --bar-muted: #d9d6cf;
   --accent: #1f4fbf;
   --accent-soft: rgb(31 79 191 / 0.1);
   /** Text on a filled event type color */
@@ -35,7 +34,6 @@
     --border-strong: #4a4843;
     --hover: #2b2a27;
     --axis: #5b5850;
-    --bar-muted: #3e3c38;
     --accent: #7ea6f4;
     --accent-soft: rgb(126 166 244 / 0.18);
     --on-color: #141413;
@@ -56,7 +54,6 @@
   --border-strong: #4a4843;
   --hover: #2b2a27;
   --axis: #5b5850;
-  --bar-muted: #3e3c38;
   --accent: #7ea6f4;
   --accent-soft: rgb(126 166 244 / 0.18);
   --on-color: #141413;

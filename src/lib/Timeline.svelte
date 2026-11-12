@@ -97,18 +97,14 @@
     return result
   })
 
-  let shownTracks = $derived(app.tracks.filter((track) => track.to >= domain.from && track.from <= domain.to))
+  let shownTracks = $derived(app.listed.filter((track) => track.to >= domain.from && track.from <= domain.to))
 
   /**
-   * Lowest and highest point of the rides on the timeline that are in the map view (or of all on
-   * the timeline, if none is), rounded to 10 m. Rides elsewhere, e.g. in a lower city, are cut off
-   * at the bottom. The lowest point is the 1st percentile, so a few minutes of bad GPS altitude
-   * don't flatten all the other rides
+   * Lowest and highest point of the rides on the timeline, rounded to 10 m. The lowest point is the
+   * 1st percentile, so a few minutes of bad GPS altitude don't flatten all the other rides
    */
   let scale = $derived.by(() => {
-    const profiled = shownTracks.filter((track) => track.elevation.length > 0)
-    const inView = profiled.filter((track) => app.inView(track))
-    const tracks = inView.length > 0 ? inView : profiled
+    const tracks = shownTracks.filter((track) => track.elevation.length > 0)
     if (tracks.length === 0) return null
     const elevations = tracks.flatMap((track) => track.elevation).sort((a, b) => a - b)
     return {
@@ -154,7 +150,7 @@
     })
   })
   /** Without playback, the playhead waits after the last ride, where everything is drawn */
-  let playhead = $derived(app.time ?? Math.max(...app.tracks.map((track) => track.to)))
+  let playhead = $derived(app.time ?? Math.max(...app.listed.map((track) => track.to)))
   let riding = $derived(app.riding.find((track) => app.selected.includes(track)) ?? app.riding[0])
 
   const ridden = (track: Track) => Math.min(1, ((app.time ?? track.to) - track.from) / (track.to - track.from))
@@ -400,7 +396,7 @@
       {:else}
         <span class="hint">Drag the timeline to move it, scroll or pinch to zoom, Shift-drag to zoom in on a span. Click a ride or drag the playhead to jump in time.</span>
       {/if}
-      {#if app.view}
+      {#if app.domain !== app.extent}
         <button type="button" class="show-all" onclick={() => (app.view = null)}>Reset zoom</button>
       {/if}
     </div>
@@ -410,7 +406,7 @@
       <div
         class="bars"
         role="presentation"
-        class:zoomed={app.view !== null}
+        class:zoomed={app.domain !== app.extent}
         class:dragging
         title="Click to jump in time, drag to move, Shift-drag to zoom in, double-click to zoom out"
         bind:this={bars}
@@ -431,19 +427,17 @@
         {#each shapes as bar (bar.track.osm)}
           {@const track = bar.track}
           {@const shown = !app.hidden.has(track.osm)}
-          {@const visible = app.inView(track)}
           <button
             type="button"
             class="bar"
             class:shown
-            class:visible
-            class:faded={app.time !== null && track.from > app.time && visible && shown}
+            class:faded={app.time !== null && track.from > app.time && shown}
             class:hot={app.hovered === track.osm || app.riding.includes(track)}
             style:left="{bar.left}px"
             style:top="{bar.top}px"
             style:width="{bar.width}px"
             style:--color={eventColor(track.type)}
-            aria-label="Jump to {track.title}, {km(track.km)} km{visible ? '' : ', outside the map view'}{shown ? '' : ', hidden'}"
+            aria-label="Jump to {track.title}, {km(track.km)} km{shown ? '' : ', hidden'}"
             onclick={(event) => clickBar(event, track)}
             onpointerenter={(event) => {
               // A finger doesn't hover, and the timeline captures it, so it would never leave
@@ -454,7 +448,7 @@
             <svg width={bar.width} height={bar.height} aria-hidden="true"><path d={bar.d} /></svg>
           </button>
         {/each}
-        {#if app.tracks.length > 0}
+        {#if app.listed.length > 0}
           <div
             class="playhead"
             class:idle={app.time === null}
@@ -659,7 +653,7 @@
     border-left: 1px dashed var(--border-strong);
   }
 
-  /* In the map view in its type color, hollow if unchecked, grey if elsewhere */
+  /* In its type color, hollow if unchecked */
   .bar {
     position: absolute;
     bottom: 0;
@@ -674,17 +668,13 @@
   }
 
   .bar path {
-    fill: var(--bar-muted);
+    fill: var(--surface);
+    stroke: var(--color);
     stroke-width: 1.5;
     stroke-linejoin: round;
   }
 
-  .bar.visible path {
-    fill: var(--surface);
-    stroke: var(--color);
-  }
-
-  .bar.visible.shown path {
+  .bar.shown path {
     fill: var(--color);
     stroke: none;
   }
